@@ -1,0 +1,1 @@
+python train.py --model Flame_two_stream --path_rgb ./254p\ RGB\ Images/ --path_ir ./254p\ Thermal\ Images/ --batch_size 64 --lr 1e-3 --classes_num 3 --EPOCH 10 --mode both

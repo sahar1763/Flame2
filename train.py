@@ -18,6 +18,7 @@ fine-tine pre-trained network
 
 
 
+
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -143,7 +144,7 @@ def test(dataloader,net,DEVICE,MODE,Model_name,name_index,log_path,correct_on_te
 
  
 if __name__ == "__main__":
-    
+
     # def main():
     parser = argparse.ArgumentParser(description='Run dgr experiment.')
     
@@ -303,8 +304,16 @@ if __name__ == "__main__":
     correct_on_test = [0]
     
     total_step = (int(len(Dataset)*split_rate)// BATCH_SIZE  )
-            
-            
+
+    # בניית שם ייחודי למודל
+    file_name = f"{Model_name}_{MODE}_index{args.index}_epoch{EPOCH}.pth"
+    save_path = os.path.join('./saved_models', file_name)
+
+    # בדיקה אם התיקייה לשמירה קיימת, ואם לא – יצירה שלה
+    if not os.path.exists('./saved_models'):
+        os.makedirs('./saved_models')
+
+
     net.train()
     max_accuracy = 0
     Loss_accuracy = []
@@ -366,7 +375,12 @@ if __name__ == "__main__":
         
         
         # torch.save(net, f'saved_model/{file_name} final batch={BATCH_SIZE}.pkl')
-        
+
+    # שמירה סופית של המודל לאחר האימון
+    final_save_path = save_path.replace('.pth', '_final.pth')
+    torch.save(net.state_dict(), final_save_path)
+    print(f"Final model saved at {final_save_path}")
+
         
     results_array = np.zeros(3,dtype=object)
     results_array[0]= loss_list
@@ -376,6 +390,7 @@ if __name__ == "__main__":
     args.log_loss_path+file_name+'.npy'
     
     np.save(args.log_loss_path+file_name+'.npy',results_array)
+    print(f"Results saved at {args.log_loss_path}")
     sys.exit()
         
         
