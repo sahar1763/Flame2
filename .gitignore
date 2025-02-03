@@ -8,3 +8,9 @@ dataset/class_0/
 dataset/class_1/
 
 dataset/class_2/
+
+dataset_FOR_IAI/c_1/
+
+*.jpg
+
+*.json
