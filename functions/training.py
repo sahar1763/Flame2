@@ -1,3 +1,5 @@
+import time
+
 import os
 import torch
 import torch.nn as nn
@@ -5,8 +7,8 @@ from torch.optim import Optimizer
 import torch.nn.functional as F
 from collections import namedtuple
 
-from .Classifier import ClassifierCifar, AutoencoderClassifier
-from .autoencoder import AutoencoderCIFAR10
+from .Classifier import Classifier, AutoencoderClassifier
+from .autoencoder import Encoder2
 
 # Creating a class to store the results
 TrainingResults = namedtuple('TrainingResults', ['train_loss', 'val_loss', 'test_loss', 'train_acc', 'val_acc', 'test_acc'])
@@ -119,6 +121,30 @@ class Trainer:
             "loss": total_loss,
             "accuracy": 100 * total_acc / len(total_loss)
         }
+    # def _run_epoch(self, dl, train, max_batches=None):
+    #     total_loss, total_acc = [], 0
+    
+    #     for i, batch in enumerate(dl):
+    #         start = time.time()
+    
+    #         if i % 10 == 0:
+    #             print(f"[{i}] Running batch {i}/{len(dl)}...")
+    
+    #         if max_batches is not None and i >= max_batches:
+    #             break
+    
+    #         batch_result = self.train_batch(batch) if train else self.test_batch(batch)
+    
+    #         batch_time = time.time() - start
+    #         print(f"    Batch {i} done in {batch_time:.2f} sec | Loss: {batch_result['loss']:.4f} | Acc: {batch_result['accuracy']:.2%}")
+    
+    #         total_loss.append(batch_result["loss"])
+    #         total_acc += batch_result["accuracy"]
+    
+    #     return {
+    #         "loss": total_loss,
+    #         "accuracy": 100 * total_acc / len(total_loss)
+    #     }
 
 
 
