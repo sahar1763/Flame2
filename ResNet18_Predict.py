@@ -135,4 +135,4 @@ dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
 class_names = dataset.classes  # שמות המחלקות מהתיקיות
 
 # הדפסת דוגמאות
-display_predictions(model, dataloader, dataset.classes, class_labels, num_samples=10)
+display_predictions(model, dataloader, dataset.classes, class_labels, num_samples=20)
