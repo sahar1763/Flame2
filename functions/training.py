@@ -1,10 +1,8 @@
 import time
-
 import os
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
-import torch.nn.functional as F
 from collections import namedtuple
 
 from .Classifier import Classifier, AutoencoderClassifier
@@ -20,7 +18,6 @@ class Trainer:
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.device = device
-        model.to(self.device)
 
     def train_batch(self, batch):
         raise NotImplementedError()
@@ -39,11 +36,14 @@ class Trainer:
 
         # Load checkpoint if it exists
         if checkpoint_path and os.path.isfile(checkpoint_path):
-            print(f"*** Loading checkpoint file")
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(checkpoint["model_state"])
-            best_acc = checkpoint.get("best_acc", best_acc)
-            epochs_without_improvement = checkpoint.get("ewi", epochs_without_improvement)
+            print(f"*** Loading checkpoint file from {checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint["model_state"])
+                best_acc = checkpoint.get("best_acc", best_acc)
+                epochs_without_improvement = checkpoint.get("ewi", epochs_without_improvement)
+            except Exception as e:
+                print(f"Failed loading checkpoint due to: {e}")
 
         # Train loop
         print("Start training")
@@ -58,7 +58,6 @@ class Trainer:
             val_loss.extend(val_result["loss"])
             val_acc.append(val_result["accuracy"])
 
-            # Testing
             test_result = self._run_epoch(dl_test, train=False, max_batches=max_batches_per_epoch)
             test_loss.extend(test_result["loss"])
             test_acc.append(test_result["accuracy"])
@@ -66,9 +65,9 @@ class Trainer:
             # Print statistics
             if epoch % print_every == 0 or epoch == num_epochs - 1:
                 print(f"--- EPOCH {epoch + 1}/{num_epochs} ---")
-                print(f"  Train Loss: {sum(train_result['loss']) / len(train_result['loss']):.4f}")
-                print(f"  Val Loss: {sum(val_result['loss']) / len(val_result['loss']):.4f}")
-                print(f"  Test Loss: {sum(test_result['loss']) / len(test_result['loss']):.4f}")
+                print(f"  Train Loss: {train_result['loss'][0]:.4f} | Train Acc: {train_result['accuracy']:.2f}%")
+                print(f"  Val Loss: {val_result['loss'][0]:.4f} | Val Acc: {val_result['accuracy']:.2f}%")
+                print(f"  Test Loss: {test_result['loss'][0]:.4f} | Test Acc: {test_result['accuracy']:.2f}%")
 
             # Early Stopping Check
             if best_acc is None or val_result["accuracy"] > best_acc:
@@ -79,17 +78,15 @@ class Trainer:
                     print(f"*** Saved checkpoint at epoch {epoch+1}")
             else:
                 epochs_without_improvement += 1
-                # Reduce Learning Rate by factor of 2 when no improvement in 3 epochs
                 if epochs_without_improvement % 3 == 0:
                     for param_group in self.optimizer.param_groups:
                         param_group['lr'] *= 0.5
-                    print(f"Reducing learning rate to {param_group['lr']:.6e}")
+                        new_lr = param_group['lr']
+                    print(f"Reducing learning rate to {new_lr:.6e}")
                 if early_stopping and epochs_without_improvement >= early_stopping:
-                    print(f"*** Early stopping {checkpoint_path} at epoch {epoch + 1} ***")
+                    print(f"*** Early stopping at epoch {epoch + 1} ***")
                     break
 
-        
-        # Return results
         return TrainingResults(
             train_loss=train_loss,
             val_loss=val_loss,
@@ -99,121 +96,46 @@ class Trainer:
             test_acc=test_acc
         )
 
-    # def _run_epoch(self, dl, train):
-    #     total_loss, total_acc = [], 0
-    #     for batch in dl:
-    #         batch_result = self.train_batch(batch) if train else self.test_batch(batch)
-    #         total_loss.append(batch_result["loss"])
-    #         total_acc += batch_result["accuracy"]
-    #     return {"loss": total_loss, "accuracy": 100*total_acc / len(dl)}
     def _run_epoch(self, dl, train, max_batches=None):
-        total_loss, total_acc = [], 0
+        total_loss, total_correct, total_samples = 0.0, 0, 0
+
         for i, batch in enumerate(dl):
-            if i%50==0:
-                print(i)
             if max_batches is not None and i >= max_batches:
                 break
+            if i % 10 == 0:
+                print(f"{'Training' if train else 'Evaluating'} batch {i}/{len(dl)}...")
+
             batch_result = self.train_batch(batch) if train else self.test_batch(batch)
-            total_loss.append(batch_result["loss"])
-            total_acc += batch_result["accuracy"]
-    
+            batch_size = len(batch[1])
+
+            total_loss += batch_result["loss"] * batch_size
+            total_correct += batch_result["accuracy"] * batch_size
+            total_samples += batch_size
+
         return {
-            "loss": total_loss,
-            "accuracy": 100 * total_acc / len(total_loss)
+            "loss": [total_loss / total_samples],
+            "accuracy": 100 * total_correct / total_samples
         }
-    # def _run_epoch(self, dl, train, max_batches=None):
-    #     total_loss, total_acc = [], 0
-    
-    #     for i, batch in enumerate(dl):
-    #         start = time.time()
-    
-    #         if i % 10 == 0:
-    #             print(f"[{i}] Running batch {i}/{len(dl)}...")
-    
-    #         if max_batches is not None and i >= max_batches:
-    #             break
-    
-    #         batch_result = self.train_batch(batch) if train else self.test_batch(batch)
-    
-    #         batch_time = time.time() - start
-    #         print(f"    Batch {i} done in {batch_time:.2f} sec | Loss: {batch_result['loss']:.4f} | Acc: {batch_result['accuracy']:.2%}")
-    
-    #         total_loss.append(batch_result["loss"])
-    #         total_acc += batch_result["accuracy"]
-    
-    #     return {
-    #         "loss": total_loss,
-    #         "accuracy": 100 * total_acc / len(total_loss)
-    #     }
-
-
-
 
 
 class ClassificationGuidedEncoding(Trainer):
-    """
-    Trainer for our Classification-Guided Encoding model.
-    """
-
-    def __init__(
-        self,
-        model: AutoencoderClassifier,
-        loss_fn: nn.Module,
-        optimizer: Optimizer,
-        device="cpu",
-    ):
-
-        super().__init__(model, loss_fn, optimizer, device)
-        self.optimizer = optimizer
-        self.loss_fn = loss_fn
-        self.device = device
-        model = model.to(self.device)
-
     def train_batch(self, batch):
         X, y = batch
-        X = X.to(self.device)
-        y = y.to(self.device)
-
-        # Train the model on one batch of data.
-        # Forward pass: Compute predictions
+        X, y = X.to(self.device), y.to(self.device)
         self.optimizer.zero_grad()
-        
         predictions = self.model(X)
-
-        # Compute loss
         loss = self.loss_fn(predictions, y)
-        
-        # Backward pass
         loss.backward()
-        
-        # Optimize parameters: Update model parameters
         self.optimizer.step()
-        
-        # Calculate the number of correct predictions
-        predicted_labels = torch.argmax(predictions, dim=1)
-        num_correct = (predicted_labels == y).sum().item()  # Convert to int
 
-        # Convert loss to a scalar value for returning
-        batch_loss = loss.item()
-
-        return {"loss": batch_loss, "accuracy": num_correct / len(y)}
+        num_correct = (predictions.argmax(dim=1) == y).sum().item()
+        return {"loss": loss.item(), "accuracy": num_correct / len(y)}
 
     def test_batch(self, batch):
         X, y = batch
-        X = X.to(self.device)
-        y = y.to(self.device)
-
+        X, y = X.to(self.device), y.to(self.device)
         with torch.no_grad():
-            # Evaluate the model on one batch of data.
-            # Forward pass: Compute predictions
             predictions = self.model(X)
-            # Compute loss
             loss = self.loss_fn(predictions, y)
-            # Calculate the number of correct predictions
-            predicted_labels = torch.argmax(predictions, dim=1)
-            num_correct = (predicted_labels == y).sum().item()  # Convert to int
-            # Convert loss to a scalar value for returning
-            batch_loss = loss.item()
-
-        return {"loss": batch_loss, "accuracy": num_correct / len(y)}
-
+            num_correct = (predictions.argmax(dim=1) == y).sum().item()
+        return {"loss": loss.item(), "accuracy": num_correct / len(y)}
