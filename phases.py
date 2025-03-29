@@ -1,4 +1,5 @@
 import subprocess
+import cv2
 import numpy as np
 import os
 from PIL import Image
@@ -6,6 +7,7 @@ import torchvision.transforms as transforms
 import torch
 import torch.nn as nn
 from torchvision import models
+import matplotlib.pyplot as plt
 
 def extract_subframes(image, subframe_res):
     subframe_height, subframe_width = subframe_res
@@ -28,7 +30,7 @@ def convert_frames_to_video(frames_path, video_path, fps=12):
         'ffmpeg',
         '-y',  # Overwrite without asking
         '-framerate', str(fps),
-        '-i', os.path.join(frames_path, 'tinted_frame_%04d.jpg'),
+        '-i', os.path.join(frames_path, '%04d.jpg'),
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',
         video_path
@@ -68,9 +70,44 @@ def phase0(frame_generator, agg_frames, init_values):
         init_values = agg_frames(init_values, frame, i_frame)
         yield init_values
 
-def phase1(frame_generator, init_values, map_to_cells):
-    for frame in frame_generator:
-        pass
+def create_difference_heatmap(frame1, frame2, save_path=None, aggregate_size=16):
+    assert frame1.shape == frame2.shape, "Frames must be the same shape"
+    frame1 = frame1.astype(np.float32)
+    frame2 = frame2.astype(np.float32)
+    k = aggregate_size
+
+    if k > 1:
+        frame1 = cv2.blur(frame1, (k, k))
+        frame2 = cv2.blur(frame2, (k, k))
+
+    # Compute grayscale difference
+    diff = np.abs(frame1 - frame2)
+    diff_gray = np.sum(diff, axis=2)
+    MAX_DIFF = 255 * 3
+    norm_diff = diff_gray / MAX_DIFF
+    norm_diff = np.power(norm_diff, 0.6)
+
+    # Overlay heatmap by tinting red
+    overlay = frame2.copy()
+    
+    '''overlay[:, :, 0] = norm_diff * 255
+    overlay[:, :, 1] = norm_diff * 255
+    overlay[:, :, 2] = norm_diff * 255'''
+    
+    # overlay = cv2.blur(overlay, (k, k))
+    
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+    result_image = Image.fromarray(overlay)
+
+    if save_path:
+        result_image.save(save_path)
+    else:
+        result_image.show()
+
+def phase1(frame_generator, first_frame, aggregate_size=1):
+    for i_frame, frame in enumerate(frame_generator):
+        create_difference_heatmap(first_frame, frame, f".\\tmp\\{i_frame:04d}.jpg", aggregate_size=aggregate_size)
+
 
 def phase2(model, frame_generator, save_path, subframe_res=(120, 120), make_video=True):
     for frame_index, frame in enumerate(frame_generator):
@@ -152,7 +189,10 @@ def create_frame_generator(frames_path):
 
 
 if __name__ == "__main__":
-    FRAMES_PATH = 'C:\\Users\\User\\OneDrive - Technion\\FireMan\\Fire\\dji_video_011\\dji_video_011_rgb'
-    model = load_model()
+    FRAMES_PATH = 'C:\\Users\\User\\OneDrive - Technion\\FireMan\\Fire\\dji_video_004\\dji_video_004_rgb'
+    #model = load_model()
     frames_generator = create_frame_generator(FRAMES_PATH)
-    phase2(model, frames_generator, ".\\tmp")
+    first_frame = next(frames_generator)
+    phase1(frames_generator, first_frame)
+    convert_frames_to_video(".\\tmp", ".\\output.mp4")
+    #phase2(model, frames_generator, ".\\tmp")
