@@ -1,0 +1,28 @@
+תפעול הקוד:
+הקבצים הרלוונטים:
+Main.ipynb - הnotebook הראשי, שם מתבצעת טעינת הdata, ושם מריצים את האימון
+שאר הקבצים הרלוונטים - נמצאים בתיקייה functions:
+training.py - מגדיר את האימון (class Trainer)
+Classifier.py - מגדיר את המסווג (MLP)
+autoencoder.py - מגדיר את האינקודר (חילוץ הפיצ'רים). מסתיים בשכבה לינארית (שאחר כך מתחברת למסווג)
+
+שאר הקבצים כרגע לא רלוונטים.
+
+כדי להריץ אימון:
+צריך לשנות את הניתוב לdataset ולקובץ אקסל של הlabels לניתוב הנכון, בקובץ Main.ipynb בשורות:
+# Paths (replace with actual paths)
+images_dir = 'Datasets_FromDvir/Datasets/rgb_images'
+labels_excel_path = 'Datasets_FromDvir/Datasets/labels.csv'
+
+
+כמה פרמטרים שאפשר לשנות ולשחק איתם:
+בקובץ Main.ipynb:
+image_size=32 - שולט בגודל התמונה (כמות הפיקסלים)
+batch_size = 128*2
+latent_dim = 8
+
+ואפשר לשלוט גם בפרמטרי האימון עצמו בשורה: fit_res = trainer.fit
+
+כרגע התיוג של הדאטא נעשה לפי 4 classes, בהתאם לקיום של אש ועשן.
+יכול להיות שכדאי לעדכן רק ל2 תיוגים (יש אש/עשן-שריפה, או אין). במידה ומשנים את זה - גם במסווג צריך לשנות את מספר הסיווגים בהתאם, בקובץ Main.ipynb:
+classifier_org = Classifier(input_dim=latent_dim, num_classes=4).to(device) - ל:num_classes=2
