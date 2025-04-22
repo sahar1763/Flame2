@@ -120,7 +120,7 @@ class Trainer:
 
 class ClassificationGuidedEncoding(Trainer):
     def train_batch(self, batch):
-        X, y = batch
+        X, y, _ = batch
         X, y = X.to(self.device), y.to(self.device)
         self.optimizer.zero_grad()
         predictions = self.model(X)
@@ -132,7 +132,7 @@ class ClassificationGuidedEncoding(Trainer):
         return {"loss": loss.item(), "accuracy": num_correct / len(y)}
 
     def test_batch(self, batch):
-        X, y = batch
+        X, y, _ = batch
         X, y = X.to(self.device), y.to(self.device)
         with torch.no_grad():
             predictions = self.model(X)
