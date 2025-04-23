@@ -100,3 +100,6 @@ dataset/class_2/
 dataset_FOR_IAI/c_1/
 *.jpg
 *.json
+
+# Results
+results/
