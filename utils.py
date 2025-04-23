@@ -13,27 +13,27 @@ def create_homography(pts_dst, pts_src):
     H, _ = cv2.findHomography(pts_src, pts_dst)
     return H
 
-# === 2. Convert grid index (i, j) to image coordinates (u, v) ===
-def grid_to_image(i, j, H_grid_to_world, H_world_to_image):
-    """
-    Converts a grid cell (i, j) to its corresponding image pixel (u, v),
-    using two homographies: grid→world, world→image.
-    """
-    # Convert grid index to homogeneous point
-    point_grid = np.array([j, i, 1.0], dtype=np.uint8)
+# # === 2. Convert grid index (i, j) to image coordinates (u, v) ===
+# def grid_to_image(i, j, H_grid_to_world, H_world_to_image):
+#     """
+#     Converts a grid cell (i, j) to its corresponding image pixel (u, v),
+#     using two homographies: grid→world, world→image.
+#     """
+#     # Convert grid index to homogeneous point
+#     point_grid = np.array([j, i, 1.0], dtype=np.uint8)
 
-    # Map to world coordinates
-    point_world = H_grid_to_world @ point_grid
-    point_world /= point_world[2]
-    lon, lat = point_world[0], point_world[1]
+#     # Map to world coordinates
+#     point_world = H_grid_to_world @ point_grid
+#     point_world /= point_world[2]
+#     lon, lat = point_world[0], point_world[1]
 
-    # Map to image coordinates
-    point_world_hom = np.array([lon, lat, 1.0], dtype=np.uint8)
-    point_image = H_world_to_image @ point_world_hom
-    point_image /= point_image[2]
-    u, v = point_image[0], point_image[1]
+#     # Map to image coordinates
+#     point_world_hom = np.array([lon, lat, 1.0], dtype=np.uint8)
+#     point_image = H_world_to_image @ point_world_hom
+#     point_image /= point_image[2]
+#     u, v = point_image[0], point_image[1]
 
-    return u, v
+#     return u, v
 
 # === 3. Map entire grid to image using homographies and remap ===
 def warp_image_to_grid(grid, image, H_grid_to_world, H_world_to_image, grid_height, grid_width):
@@ -78,10 +78,6 @@ def warp_image_to_grid(grid, image, H_grid_to_world, H_world_to_image, grid_heig
     return new_grid
 
 
-# === 4. Compute difference ===
-def compute_difference_map(original, updated):
-    return updated - original
-
 # === 5. Find subgrid coordinates ===
 def get_subgrid_bounds_precise(pts_world, lon_origin, lat_origin, resolution, grid_width=None, grid_height=None):
     """
@@ -116,29 +112,29 @@ def get_subgrid_bounds_precise(pts_world, lon_origin, lat_origin, resolution, gr
 
     return j_min, j_max, i_min, i_max
 
-# === 5. Creating subgrid ===
-def extract_subgrid_from_bounds(grid, j_min, j_max, i_min, i_max):
-    """
-    Cuts a subgrid from the full grid using float-based grid bounds.
+# # === 5. Creating subgrid ===
+# def extract_subgrid_from_bounds(grid, j_min, j_max, i_min, i_max):
+#     """
+#     Cuts a subgrid from the full grid using float-based grid bounds.
 
-    Parameters:
-        grid: 2D array [height, width]
-        j_min, j_max, i_min, i_max: float grid locations
+#     Parameters:
+#         grid: 2D array [height, width]
+#         j_min, j_max, i_min, i_max: float grid locations
 
-    Returns:
-        subgrid: 2D array (sliced from grid)
-        i_start, i_end, j_start, j_end: integer indices used
-    """
-    # Convert float positions to integer indices
-    j_start = int(j_min)
-    j_end   = int(j_max)
-    i_start = int(i_min)
-    i_end   = int(i_max)
+#     Returns:
+#         subgrid: 2D array (sliced from grid)
+#         i_start, i_end, j_start, j_end: integer indices used
+#     """
+#     # Convert float positions to integer indices
+#     j_start = int(j_min)
+#     j_end   = int(j_max)
+#     i_start = int(i_min)
+#     i_end   = int(i_max)
 
-    # Cut the subgrid
-    subgrid = grid[i_start:i_end, j_start:j_end]
+#     # Cut the subgrid
+#     subgrid = grid[i_start:i_end, j_start:j_end]
 
-    return subgrid, i_start, i_end, j_start, j_end
+#     return subgrid, i_start, i_end, j_start, j_end
 
 
 # def create_subgrid_from_bounds(lon_min, lon_max, lat_min, lat_max, resolution):
@@ -353,11 +349,11 @@ def add_uniform_spots(image,
 
 
 
-def compute_vfov_from_hfov(hfov_deg, width, height):
-    hfov_rad = np.radians(hfov_deg)
-    aspect_ratio = height / width
-    vfov_rad = 2 * np.arctan(np.tan(hfov_rad / 2) * aspect_ratio)
-    return np.degrees(vfov_rad)
+# def compute_vfov_from_hfov(hfov_deg, width, height):
+#     hfov_rad = np.radians(hfov_deg)
+#     aspect_ratio = height / width
+#     vfov_rad = 2 * np.arctan(np.tan(hfov_rad / 2) * aspect_ratio)
+#     return np.degrees(vfov_rad)
 
 def get_ground_corners(x, y, h, theta_deg, phi_deg, hfov_deg, width=1280, height=720):
     vfov_deg = compute_vfov_from_hfov(hfov_deg, width, height)
@@ -398,31 +394,31 @@ def get_ground_corners(x, y, h, theta_deg, phi_deg, hfov_deg, width=1280, height
         corners_world.append(point[:2])
     return np.array(corners_world)
 
-def compute_polygon_area(points):
-    # Shoelace formula for area of polygon
-    x = points[:, 0]
-    y = points[:, 1]
-    return 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+# def compute_polygon_area(points):
+#     # Shoelace formula for area of polygon
+#     x = points[:, 0]
+#     y = points[:, 1]
+#     return 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
 
-def plot_drone_view(corners, drone_pos, range_xy=15000):
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.plot(*drone_pos, 'ro', label='Drone Position')
+# def plot_drone_view(corners, drone_pos, range_xy=15000):
+#     fig, ax = plt.subplots(figsize=(8, 6))
+#     ax.plot(*drone_pos, 'ro', label='Drone Position')
 
-    polygon = np.vstack([corners, corners[0]])
-    ax.plot(polygon[:, 0], polygon[:, 1], 'b-', label='Camera Footprint')
-    ax.fill(polygon[:, 0], polygon[:, 1], color='lightblue', alpha=0.4)
+#     polygon = np.vstack([corners, corners[0]])
+#     ax.plot(polygon[:, 0], polygon[:, 1], 'b-', label='Camera Footprint')
+#     ax.fill(polygon[:, 0], polygon[:, 1], color='lightblue', alpha=0.4)
 
-    # קביעת טווח הצירים לפי המרכז שאתה רוצה
-    ax.set_xlim(- range_xy, range_xy)
-    ax.set_ylim(- range_xy, range_xy)
+#     # קביעת טווח הצירים לפי המרכז שאתה רוצה
+#     ax.set_xlim(- range_xy, range_xy)
+#     ax.set_ylim(- range_xy, range_xy)
 
-    ax.set_aspect('equal')
-    ax.grid(True)
-    ax.legend()
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("Drone Camera Ground Footprint")
-    plt.show()
+#     ax.set_aspect('equal')
+#     ax.grid(True)
+#     ax.legend()
+#     ax.set_xlabel("X")
+#     ax.set_ylabel("Y")
+#     ax.set_title("Drone Camera Ground Footprint")
+#     plt.show()
 
 def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_samples=2, min_contrast=10):
     """
