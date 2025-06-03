@@ -349,7 +349,7 @@ result = predict_crops_majority_vote(
     device,
     original_image=image1,
     crops_np=cropped_images_np,
-    plot=True
+    plot=False
 )
 
 

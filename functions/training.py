@@ -4,9 +4,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Optimizer
 from collections import namedtuple
-
-from .Classifier import Classifier, AutoencoderClassifier
-from .autoencoder import Encoder2
+from tqdm import tqdm, trange
 
 # Creating a class to store the results
 TrainingResults = namedtuple('TrainingResults', ['train_loss', 'val_loss', 'test_loss', 'train_acc', 'val_acc', 'test_acc'])
@@ -40,6 +38,10 @@ class Trainer:
             try:
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
                 self.model.load_state_dict(checkpoint["model_state"])
+
+                if "optimizer_state" in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+                
                 best_acc = checkpoint.get("best_acc", best_acc)
                 epochs_without_improvement = checkpoint.get("ewi", epochs_without_improvement)
             except Exception as e:
@@ -47,7 +49,7 @@ class Trainer:
 
         # Train loop
         print("Start training")
-        for epoch in range(num_epochs):
+        for epoch in trange(num_epochs, desc="Epochs"): #, leave=False): #range(num_epochs): #
             self.model.train()
             train_result = self._run_epoch(dl_train, train=True, max_batches=max_batches_per_epoch)
             train_loss.extend(train_result["loss"])
@@ -74,7 +76,13 @@ class Trainer:
                 best_acc = val_result["accuracy"]
                 epochs_without_improvement = 0
                 if checkpoint_path:
-                    torch.save({"model_state": self.model.state_dict(), "best_acc": best_acc, "ewi": epochs_without_improvement}, checkpoint_path)
+                    torch.save({
+                        "model_state": self.model.state_dict(),
+                        "optimizer_state": self.optimizer.state_dict(),  # כדאי להוסיף
+                        "best_acc": best_acc,
+                        "ewi": epochs_without_improvement
+                    }, checkpoint_path)
+                    
                     print(f"*** Saved checkpoint at epoch {epoch+1}")
             else:
                 epochs_without_improvement += 1
@@ -96,22 +104,33 @@ class Trainer:
             test_acc=test_acc
         )
 
+
     def _run_epoch(self, dl, train, max_batches=None):
         total_loss, total_correct, total_samples = 0.0, 0, 0
-
-        for i, batch in enumerate(dl):
+    
+        # Set description for progress bar
+        desc = "Training" if train else "Evaluating"
+    
+        # Create tqdm iterator
+        loop = tqdm(enumerate(dl), total=len(dl), desc=desc) #, leave=False)
+    
+        for i, batch in loop:
             if max_batches is not None and i >= max_batches:
                 break
-            if i % 10 == 0:
-                print(f"{'Training' if train else 'Evaluating'} batch {i}/{len(dl)}...")
-
+    
             batch_result = self.train_batch(batch) if train else self.test_batch(batch)
             batch_size = len(batch[1])
-
+    
             total_loss += batch_result["loss"] * batch_size
             total_correct += batch_result["accuracy"] * batch_size
             total_samples += batch_size
-
+    
+            # Optional: update tqdm postfix with running stats
+            loop.set_postfix({
+                "Loss": f"{total_loss / max(total_samples, 1):.4f}",
+                "Acc": f"{100 * total_correct / max(total_samples, 1):.2f}%"
+            })
+    
         return {
             "loss": [total_loss / total_samples],
             "accuracy": 100 * total_correct / total_samples
@@ -121,7 +140,7 @@ class Trainer:
 class ClassificationGuidedEncoding(Trainer):
     def train_batch(self, batch):
         X, y, _ = batch
-        X, y = X.to(self.device), y.to(self.device)
+        X, y = X.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
         self.optimizer.zero_grad()
         predictions = self.model(X)
         loss = self.loss_fn(predictions, y)
@@ -133,7 +152,7 @@ class ClassificationGuidedEncoding(Trainer):
 
     def test_batch(self, batch):
         X, y, _ = batch
-        X, y = X.to(self.device), y.to(self.device)
+        X, y = X.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
         with torch.no_grad():
             predictions = self.model(X)
             loss = self.loss_fn(predictions, y)
