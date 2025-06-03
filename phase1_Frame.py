@@ -74,12 +74,13 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     # Step 1: Define the image corners in pixel coordinates for image1
     # Format: [top-left, top-right, bottom-right, bottom-left]
-    pts_image = np.array([
-          [0, 0],                                # top-left
-          [image_width - 1, 0],                  # top-right
-          [image_width - 1, image_height - 1],   # bottom-right
-          [0, image_height - 1]                  # bottom-left
-      ], dtype=np.float32)
+    pts_image = generate_uniform_grid(image_height, image_width, points_num=4)
+    # pts_image = np.array([
+    #       [0, 0],                                # top-left
+    #       [image_width - 1, 0],                  # top-right
+    #       [image_width - 1, image_height - 1],   # bottom-right
+    #       [0, image_height - 1]                  # bottom-left
+    #   ], dtype=np.float32)
 
     # Homography
     H_image1_to_image0 = create_homography(pts_image, pixels_img0_at_img1)
@@ -169,10 +170,10 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     ax.plot(*drone_pos, 'ro', label='Drone Position')
     
     # Create closed polygon from corners
-    polygon1 = np.vstack([corners_0, corners_0[0]])
+    polygon1 = np.vstack([corners_0[0], corners_0[1], corners_0[3], corners_0[2], corners_0[0]])
     ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
     ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
-    polygon2 = np.vstack([corners_1, corners_1[0]])
+    polygon2 = np.vstack([corners_1[0], corners_1[1], corners_1[3], corners_1[2], corners_1[0]])
     ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
     ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
     
@@ -220,10 +221,8 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     ax.plot(*drone_pos, 'ro', label='Drone Position')
     
     # Create closed polygon from corners
-    polygon1 = np.vstack([corners_0, corners_0[0]])
     ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
     ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
-    polygon2 = np.vstack([corners_1, corners_1[0]])
     ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
     ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
     
@@ -455,7 +454,7 @@ def Phi_Theta_Generation():
     for phi, reps in zip(phi_values, repetitions):
         PHI.extend([phi] * reps)
         step = 360 / reps
-        theta_values = [270 + step * i for i in range(reps)]
+        theta_values = [step * i for i in range(reps)]
         THETA.extend(theta_values)
     
     # Convert to numpy arrays (optional)
@@ -527,12 +526,13 @@ def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1):
 
     # Step 1: Define the image corners in pixel coordinates for image1
     # Format: [top-left, top-right, bottom-right, bottom-left]
-    pts_image = np.array([
-          [0, 0],                                # top-left
-          [image_width - 1, 0],                  # top-right
-          [image_width - 1, image_height - 1],   # bottom-right
-          [0, image_height - 1]                  # bottom-left
-      ], dtype=np.float32)
+    pts_image = generate_uniform_grid(image_height, image_width, points_num=4)
+    # pts_image = np.array([
+    #       [0, 0],                                # top-left
+    #       [image_width - 1, 0],                  # top-right
+    #       [image_width - 1, image_height - 1],   # bottom-right
+    #       [0, image_height - 1]                  # bottom-left
+    #   ], dtype=np.float32)
     
     # Step 2: Compute homography that maps world coordinates (corners_1) to image1 pixels
     H_world_to_image1 = create_homography(pts_image, corners_1)
@@ -551,8 +551,8 @@ if __name__ == "__main__":
     # Parameters
     x0, y0 = 0, 7500
     h0 = 2500
-    theta0 = 45 # yaw
-    phi0 = 50   # pitch
+    theta0 = 0 # yaw
+    phi0 = 0   # pitch
     hfov0 = 17.5   # horizontal field of view
 
     # Define standard deviations (σ) for each parameter
@@ -622,67 +622,67 @@ if __name__ == "__main__":
     print(df.head())
 
 
-if __name__ == "__main__":
-
-    # Parameters
-    x1, y1 = 0, 7500
-    h1 = 2500
-    theta1 = 45  # yaw
-    phi1 = 0 # pitch
-    hfov1= 17.5  # horizontal field of view
-
-    # Load the thermal image as-is
-    image0 = cv2.imread('254p Thermal Images/8372.jpg', cv2.IMREAD_UNCHANGED)
-    # Option 1: Convert to grayscale (standard luminance formula)
-    image0 = cv2.cvtColor(image0, cv2.COLOR_BGR2GRAY)
-    # Option 2 (alternative): Use only one channel (if it's duplicated)
-    # image_gray = image_color[:, :, 2]  # e.g., Red channel
-    # Normalize to 0–255
-    image0 = cv2.normalize(image0, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-    image0 = image0.astype(np.uint8)
-
-
-    # Load the thermal image as-is
-    image1 = cv2.imread('254p Thermal Images/17354.jpg', cv2.IMREAD_UNCHANGED)
-    # Option 1: Convert to grayscale (standard luminance formula)
-    image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
-    # Option 2 (alternative): Use only one channel (if it's duplicated)
-    # image_gray = image_color[:, :, 2]  # e.g., Red channel
-    # Normalize to 0–255
-    image1 = cv2.normalize(image1, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-    image1 = image1.astype(np.uint8)
-
-    print(image1.shape)
-
-    import matplotlib
-
-    matplotlib.use('TkAgg')  # Force external window for plots
-    import matplotlib.pyplot as plt
-
-    # Create histograms for image0 and image1
-    plt.figure(figsize=(12, 5))
-
-    # Histogram for image0
-    plt.subplot(1, 2, 1)
-    plt.hist(image0.ravel(), bins=256, range=(0, 255), color='blue', alpha=0.7)
-    plt.title("Histogram of Image 0")
-    plt.xlabel("Pixel Intensity")
-    plt.ylabel("Frequency")
-
-    # Histogram for image1
-    plt.subplot(1, 2, 2)
-    plt.hist(image1.ravel(), bins=256, range=(0, 255), color='green', alpha=0.7)
-    plt.title("Histogram of Image 1")
-    plt.xlabel("Pixel Intensity")
-    plt.ylabel("Frequency")
-
-    plt.tight_layout()
-
-    # Calculate and print total number of pixels (sum of histogram bins)
-    hist_vals, _ = np.histogram(image1, bins=256, range=(0, 255))
-    print("Total pixel count from histogram (image1):", np.sum(hist_vals))
-
-    plt.show()
+# if __name__ == "__main__":
+#
+#     # Parameters
+#     x1, y1 = 0, 7500
+#     h1 = 2500
+#     theta1 = 45  # yaw
+#     phi1 = 0 # pitch
+#     hfov1= 17.5  # horizontal field of view
+#
+#     # Load the thermal image as-is
+#     image0 = cv2.imread('254p Thermal Images/8372.jpg', cv2.IMREAD_UNCHANGED)
+#     # Option 1: Convert to grayscale (standard luminance formula)
+#     image0 = cv2.cvtColor(image0, cv2.COLOR_BGR2GRAY)
+#     # Option 2 (alternative): Use only one channel (if it's duplicated)
+#     # image_gray = image_color[:, :, 2]  # e.g., Red channel
+#     # Normalize to 0–255
+#     image0 = cv2.normalize(image0, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+#     image0 = image0.astype(np.uint8)
+#
+#
+#     # Load the thermal image as-is
+#     image1 = cv2.imread('254p Thermal Images/17354.jpg', cv2.IMREAD_UNCHANGED)
+#     # Option 1: Convert to grayscale (standard luminance formula)
+#     image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
+#     # Option 2 (alternative): Use only one channel (if it's duplicated)
+#     # image_gray = image_color[:, :, 2]  # e.g., Red channel
+#     # Normalize to 0–255
+#     image1 = cv2.normalize(image1, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+#     image1 = image1.astype(np.uint8)
+#
+#     print(image1.shape)
+#
+#     import matplotlib
+#
+#     matplotlib.use('TkAgg')  # Force external window for plots
+#     import matplotlib.pyplot as plt
+#
+#     # Create histograms for image0 and image1
+#     plt.figure(figsize=(12, 5))
+#
+#     # Histogram for image0
+#     plt.subplot(1, 2, 1)
+#     plt.hist(image0.ravel(), bins=256, range=(0, 255), color='blue', alpha=0.7)
+#     plt.title("Histogram of Image 0")
+#     plt.xlabel("Pixel Intensity")
+#     plt.ylabel("Frequency")
+#
+#     # Histogram for image1
+#     plt.subplot(1, 2, 2)
+#     plt.hist(image1.ravel(), bins=256, range=(0, 255), color='green', alpha=0.7)
+#     plt.title("Histogram of Image 1")
+#     plt.xlabel("Pixel Intensity")
+#     plt.ylabel("Frequency")
+#
+#     plt.tight_layout()
+#
+#     # Calculate and print total number of pixels (sum of histogram bins)
+#     hist_vals, _ = np.histogram(image1, bins=256, range=(0, 255))
+#     print("Total pixel count from histogram (image1):", np.sum(hist_vals))
+#
+#     plt.show()
 
 
 
