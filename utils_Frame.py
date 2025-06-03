@@ -28,7 +28,7 @@ def preprocess_images(image1, image2, applying=0):
 def compute_positive_difference(img1, img2):
     diff = img2 - img1
     # diff[np.isnan(diff)] = 0
-    diff[diff < 0] = 0
+    diff[img2 < img1] = 0
     return diff
 
 def postprocess_difference_map(diff, img2, threshold=None, temp_threshold=None):
@@ -195,10 +195,10 @@ def get_ground_corners(x, y, h, theta_deg, phi_deg, hfov_deg, width=1280, height
     vfov = np.radians(vfov_deg)
 
     corners = np.array([
-        [np.tan(hfov/2),  np.tan(vfov/2), -1],
-        [-np.tan(hfov/2),  np.tan(vfov/2), -1],
-        [-np.tan(hfov/2), -np.tan(vfov/2), -1],
-        [np.tan(hfov/2), -np.tan(vfov/2), -1],
+        [ -np.tan(hfov / 2),np.tan(vfov / 2), -1],
+        [ np.tan(hfov / 2),np.tan(vfov / 2), -1],
+        [ -np.tan(hfov / 2),-np.tan(vfov / 2), -1],
+        [ np.tan(hfov / 2),-np.tan(vfov / 2), -1],
     ])
 
     dirs = corners / np.linalg.norm(corners, axis=1, keepdims=True)
@@ -312,3 +312,28 @@ def compute_cluster_scores(label_map, image1, GSD, norm_size=5**2, norm_intensit
 
 
     return scores
+
+def generate_uniform_grid(h, w, points_num):
+    # Compute number of points along y and x axis maintaining the aspect ratio
+    ratio = h / w
+    n_y = int(np.round(np.sqrt(points_num * ratio)))
+    n_x = int(np.round(points_num / n_y))
+    
+    # Safety correction to ensure total points = points_num
+    while n_x * n_y > points_num:
+        if n_x > n_y:
+            n_x -= 1
+        else:
+            n_y -= 1
+    while n_x * n_y < points_num:
+        if n_x < n_y:
+            n_x += 1
+        else:
+            n_y += 1
+
+    # Generate grid coordinates
+    ys = np.linspace(0, h - 1, n_y, dtype=int)
+    xs = np.linspace(0, w - 1, n_x, dtype=int)
+    points = np.array([(y, x) for y in ys for x in xs])
+
+    return points
