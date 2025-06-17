@@ -247,7 +247,7 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
     """
     active_pixels = np.argwhere(diff_map > threshold)
     if len(active_pixels) == 0:
-        return [], [], np.full_like(diff_map, -1)
+        return [], np.full_like(diff_map, -1), []
 
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(active_pixels)
     labels_flat = clustering.labels_
