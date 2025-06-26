@@ -65,7 +65,7 @@ class RealScanManager:
         corners_0 = self.corners[frame_id]
 
         # Fire Max Size (length)
-        fire_size = 10  # [m]
+        fire_size = 1  # [m]
         # DB_Scan parameters
         min_samples_factor = 10
         eps_distance_factor = 1.5
@@ -106,7 +106,7 @@ class RealScanManager:
         # Preprocess, compare, cluster, and score
         image1, image0_proj = preprocess_images(image1, image0_proj, applying=0)
         diff_map = compute_positive_difference(image0_proj, image1)
-        diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=0)
+        # diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=None)
 
         # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
         min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))

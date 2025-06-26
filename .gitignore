@@ -105,3 +105,6 @@ dataset_FOR_IAI/c_1/
 # Results
 results/
 results0/
+dataset_FOR_IAI/
+
+*.VOB

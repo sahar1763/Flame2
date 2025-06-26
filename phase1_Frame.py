@@ -106,7 +106,7 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     # Step 3: Post-process the difference map to suppress noise and irrelevant areas
     # threshold = 0 keeps only strictly positive differences
     # temp_threshold = 0 filters out low-intensity regions in image1
-    diff_map = postprocess_difference_map(diff_map, image1, threshold=100, temp_threshold=0)
+    # diff_map = postprocess_difference_map(diff_map, image1, threshold=100, temp_threshold=None)
     
     # === Cluster Detection Based on Difference Map ===
     
@@ -326,7 +326,7 @@ def test(image1, image0, x1, y1, h1, theta1, phi1, hfov1):
     # Step 3: Post-process the difference map to suppress noise and irrelevant areas
     # threshold = 0 keeps only strictly positive differences
     # temp_threshold = 0 filters out low-intensity regions in image1
-    diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=0)
+    diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=None)
 
     # === Cluster Detection Based on Difference Map ===
 

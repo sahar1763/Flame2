@@ -48,7 +48,7 @@ def postprocess_difference_map(diff, img2, threshold=None, temp_threshold=None):
         diff[diff <= threshold] = 0
 
     if temp_threshold is not None:
-        temp_mask = img2 <= (img2.mean() + temp_threshold)
+        temp_mask = img2 <= (img2.median() + temp_threshold)
         diff[temp_mask] = 0
 
     return diff

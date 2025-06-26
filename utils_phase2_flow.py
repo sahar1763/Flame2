@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-def crop_bbox_scaled(image, bbox, crop_factor):
+def crop_bbox_scaled(image, bbox, crop_factor, min_cropsize=None):
     """
     Crop an RGB image around a bounding box, enlarging it by a crop factor.
 
@@ -28,6 +28,8 @@ def crop_bbox_scaled(image, bbox, crop_factor):
     bbox_width = x_max - x_min
     bbox_height = y_max - y_min
     max_dim = max(bbox_width, bbox_height)
+    if min_cropsize is not None:
+        max_dim = max(max_dim, min_cropsize)
 
     # Final crop size
     crop_size = int(np.ceil(max_dim * crop_factor))
