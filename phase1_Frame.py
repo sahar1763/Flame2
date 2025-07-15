@@ -1,14 +1,11 @@
 import os
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from itertools import combinations
-from math import sqrt
 from utils_Frame import *
 import cv2
 import random
-from sklearn.cluster import DBSCAN
 import matplotlib.patches as patches
+import yaml
 import time
 
 Scan0 = {}
@@ -37,32 +34,28 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     
     global Scan0
 
-    # Fire Max Size (length)
-    fire_size = 10 # [m]
+    # # Fire Max Size (length)
+    # fire_size = 10 # [m]
     
     # DB_Scan parameters
-    min_samples_factor = 10
-    eps_distance_factor = 1.5
-    # Important Calculation
-    # Calculations
-    Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-    HFOV = hfov1  # Horizontal field of view (degrees)
-    IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-    GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
-    
-    fire_length_pixel = np.floor(fire_size / GSD)
-    fire_num_pixel = fire_length_pixel**2
+    min_samples_factor = config['dbscan']['min_samples_factor']
+    eps_distance_factor = config['dbscan']['eps_distance_factor']
+    # # Important Calculation
+    # Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
+    # HFOV = hfov1  # Horizontal field of view (degrees)
+    # IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
+    # GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
+    #
+    # fire_length_pixel = np.floor(fire_size / GSD)
+    # fire_num_pixel = fire_length_pixel**2
 
     # FOV calc for Phase 2
-    patch_length = 224  # total patch size in pixels
-    ratio_patch = 0.7         # fire ratio within the patch
-    ratio_image = 0.25         # fire ratio within the RGB image
-    IR2RGB_ratio = 1920 / 1280  # resolution ratio between RGB and IR images
-    rgb_len = 1080
-    min_fov = 2.2   # degrees - minimal allowed FOV
-    max_fov = 60.0  # degrees - maximal allowed FOV
-
-
+    # patch_length = 224  # total patch size in pixels
+    # ratio_patch = 0.7         # fire ratio within the patch
+    ratio_image = config['fire']['ratio_in_rgb_image']  # fire ratio within the RGB image
+    IR2RGB_ratio = rgb_width / ir_width  # resolution ratio between RGB and IR images
+    min_fov = config['fov']['min_deg']  # degrees - minimal allowed FOV
+    max_fov = config['fov']['max_deg']  # degrees - maximal allowed FOV
 
     image_height = image1.shape[0]
     image_width = image1.shape[1]
@@ -74,13 +67,7 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     # Step 1: Define the image corners in pixel coordinates for image1
     # Format: [top-left, top-right, bottom-right, bottom-left]
-    pts_image = generate_uniform_grid(image_height, image_width, points_num=4)
-    # pts_image = np.array([
-    #       [0, 0],                                # top-left
-    #       [image_width - 1, 0],                  # top-right
-    #       [image_width - 1, image_height - 1],   # bottom-right
-    #       [0, image_height - 1]                  # bottom-left
-    #   ], dtype=np.float32)
+    pts_image = generate_uniform_grid(image_height, image_width, points_num=config['grid']['points_per_frame'])
 
     # Homography
     H_image1_to_image0 = create_homography(pts_image, pixels_img0_at_img1)
@@ -98,40 +85,37 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     # === Preprocess and Compute Difference ===
 
     # Step 1: Preprocess images (convert to uint8, optionally normalize)
-    image1, Image0_projected = preprocess_images(image1, Image0_projected, applying=0)
+    image1, Image0_projected = preprocess_images(image1, Image0_projected, applying=config['preprocessing']['apply'])
     
     # Step 2: Compute positive difference (changes in image1 that are brighter than image0 projection)
     diff_map = compute_positive_difference(Image0_projected, image1)
     
     # Step 3: Post-process the difference map to suppress noise and irrelevant areas
-    # threshold = 0 keeps only strictly positive differences
-    # temp_threshold = 0 filters out low-intensity regions in image1
-    # diff_map = postprocess_difference_map(diff_map, image1, threshold=100, temp_threshold=None)
+    diff_map = postprocess_difference_map(diff_map, image1, threshold=config['postprocessing']['threshold'], temp_threshold=config['postprocessing']['temp_threshold'])
     
     # === Cluster Detection Based on Difference Map ===
     
     # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
     min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
+    min_samples = max(1, min_samples)
     eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
+    eps_distance = max(2, eps_distance)
     
     # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
     print(f"min_samples: {min_samples}")
     centers, label_map, bboxes = find_cluster_centers_conditional(
         diff_map=diff_map,
-        threshold=100,           # Only consider pixels with diff > 10
+        threshold=config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
         eps=eps_distance,       # Clustering radius
         min_samples=min_samples,  # Minimum number of points in cluster
-        min_contrast=10         # Contrast-based center selection
+        min_contrast=config['dbscan']['min_contrast']  # Contrast-based center selection
     )
 
     # Compute scores
-    scores = compute_cluster_scores(label_map, image1, GSD)
+    scores = compute_cluster_scores(label_map, image1, GSD, norm_size=config['scoring']['norm_size'],
+                                    norm_intensity=config['scoring']['norm_intensity'])
 
     # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
-    
-    # Estimate the desired fire size in RGB pixel scale (target size for zoom decision)
-    pixels_RGB_at_patch = patch_length * ratio_patch  # target fire size in RGB pixels
-
     # Initialize lists to store computed FOVs per bounding box
     required_fov2 = []  # FOVs based on entire image resolution requirement
     
@@ -140,8 +124,8 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
         x_min, y_min, x_max, y_max = bbox
     
         # Compute width and height of the bounding box in IR pixel coordinates
-        width = x_max - x_min
-        height = y_max - y_min
+        width = x_max - x_min + 1 # +1 to include both endpoints (pixel indices are inclusive)
+        height = y_max - y_min + 1 # +1 to include both endpoints (pixel indices are inclusive)
     
         # Take the longer dimension as the dominant fire size
         pixels_IR_at_current = max(width, height)
@@ -150,7 +134,7 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
         pixels_RGB_at_current = pixels_IR_at_current * IR2RGB_ratio
     
         # --- FOV Type 2: Based on whole image resolution requirement ---
-        fov2 = HFOV / (ratio_image * rgb_len / pixels_RGB_at_current)
+        fov2 = HFOV / (ratio_image * rgb_height / pixels_RGB_at_current)
         fov_clipped2 = round(np.clip(fov2, min_fov, max_fov), 2)
 
         required_fov2.append(fov_clipped2)
@@ -555,6 +539,9 @@ def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1):
 # Entry point for script execution - Original Scenario
 if __name__ == "__main__":
 
+    with open("config.yaml", 'r') as file:
+        config = yaml.safe_load(file)
+
     # Parameters
     x0, y0 = 0, 7500
     h0 = 2500
@@ -571,7 +558,7 @@ if __name__ == "__main__":
     hfov_std = 0.1
 
     # Fire Max Size (length)
-    fire_size = 10 # [m]
+    fire_size = config['fire']['max_size_m'] # [m]
 
     results = []  # List to store results from all (phi, theta) pairs
 
@@ -592,10 +579,11 @@ if __name__ == "__main__":
         hfov1 = hfov0 + random.gauss(0, hfov_std)
 
         # Important Calculation
-        # Calculations
+        rgb_width, rgb_height = config['image']['rgb_size']  # [width, height]
+        ir_width, ir_height = config['image']['ir_size']
         Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         HFOV = hfov1  # Horizontal field of view (degrees)
-        IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
+        IFOV = HFOV / rgb_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
 
         fire_length_pixel = np.floor(fire_size / GSD)
@@ -607,8 +595,8 @@ if __name__ == "__main__":
         result = main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1)
 
         # Compute performance comparison
-        num_out = 0  # or however you're computing removed clusters
-        num_clusters_in = clusters_num - num_out
+        # num_out = 0  # or however you're computing removed clusters
+        num_clusters_in = clusters_num #- num_out
         detected = len(result) if result is not None else 0
         ratio = detected / num_clusters_in if num_clusters_in > 0 else (1 if detected == 0 else 0)
 

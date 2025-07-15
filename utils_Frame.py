@@ -1,7 +1,5 @@
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.interpolate import RegularGridInterpolator
 from sklearn.cluster import DBSCAN
 
 
@@ -14,11 +12,11 @@ def create_homography(pts_dst, pts_src):
     return H
 
 
-def preprocess_images(image1, image2, applying=0):
+def preprocess_images(image1, image2, applying=False):
     img1 = image1.astype(np.uint8)
     img2 = image2.astype(np.uint8)
 
-    if applying > 0:
+    if applying:
         img1 = img1 - img1.mean()
         img2 = img2 - img2.mean()
 
@@ -135,12 +133,13 @@ def create_synthetic_image_with_clusters(image_height, image_width,
 
         # 4. Random radius for the Gaussian cluster
         radius = np.random.randint(cluster_radius_range[0], cluster_radius_range[1] + 1)
+        radius = max(radius, 1)
 
         # 5. Compute 2D Gaussian mask centered at (cx, cy)
         y, x = np.meshgrid(np.arange(image_height), np.arange(image_width), indexing='ij')
         dist_sq = (x - cx) ** 2 + (y - cy) ** 2
         cluster_value = np.random.randint(cluster_value - 50, cluster_value + 50)
-        gaussian_blob = cluster_value * np.exp(-dist_sq / (2 * (radius ** 2)))
+        gaussian_blob = cluster_value * np.exp(-dist_sq / (4 * (radius ** 2)))
 
         # 6. Update the image with the cluster (take maximum where overlapping)
         image = np.maximum(image, gaussian_blob)

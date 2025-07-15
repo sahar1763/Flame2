@@ -1,22 +1,31 @@
 from torchvision import transforms, models
 from PIL import Image
+import yaml
 
 from utils_Frame import *
 from utils_phase2_flow import *
 
-class RealScanManager:
-    def __init__(self):
-        self.frames = {}    # frame_id: frame
-        self.corners = {}   # frame_id: corners
-        # Format: [top-left, top-right, bottom-right, bottom-left]
-        image_width = 1280
-        image_height = 720
-        self.points0_arrange = generate_uniform_grid(image_height, image_width, points_num=36)
+class ScanManager:
+    def __init__(self, config_path=None):
+        # Load config.yaml from package
+        if config_path is None:
+            with pkg_resources.files(__package__).joinpath("config.yaml").open("r") as f:
+                self.config = yaml.safe_load(f)
+        else:
+            with open(config_path, "r") as f:
+                self.config = yaml.safe_load(f)
 
-        # Phase2 - Loading Model
+        # === Phase 0 ===
+        self.frames = {}    # frame_id: frame
+        self.corners = {}   # frame_id: corners. Format: [top-left, top-right, bottom-right, bottom-left]
+        ir_width, ir_height = self.config['image']['ir_size']
+        self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
+
+        # === Phase 2 - Loading Model ===
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Load checkpoint
-        checkpoint = torch.load("resnet_fire_classifier.pt", map_location=self.device)
+        # Load model from package
+        with pkg_resources.files(__package__).joinpath("resnet_fire_classifier.pt") as f:
+            checkpoint = torch.load(f, map_location=torch.device('cpu'))
 
         # Define model and load state
         num_classes = 2
@@ -65,31 +74,25 @@ class RealScanManager:
         corners_0 = self.corners[frame_id]
 
         # Fire Max Size (length)
-        fire_size = 1  # [m]
+        fire_size = self.config['fire']['max_size_m'] # [m]
         # DB_Scan parameters
-        min_samples_factor = 10
-        eps_distance_factor = 1.5
+        min_samples_factor = self.config['dbscan']['min_samples_factor']
+        eps_distance_factor = self.config['dbscan']['eps_distance_factor']
         # Important Calculation
-        # Calculations
+        rgb_width, rgb_height = self.config['image']['rgb_size'] # [width, height]
+        ir_width, ir_height = self.config['image']['ir_size']
         Slant_Range = h1 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-        IFOV = hfov1 / 1920 / 180 * np.pi  # Instantaneous Field of View [urad]
+        IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
     
         fire_length_pixel = np.floor(fire_size / GSD)
         fire_num_pixel = fire_length_pixel ** 2
     
         # FOV calc for Phase 2
-        patch_length = 224  # total patch size in pixels
-        ratio_patch = 0.7  # fire ratio within the patch
-        ratio_image = 0.25  # fire ratio within the RGB image
-        IR2RGB_ratio = 1920 / 1280  # resolution ratio between RGB and IR images
-        rgb_len = 1080
-        min_fov = 2.2  # degrees - minimal allowed FOV
-        max_fov = 60.0  # degrees - maximal allowed FOV
-    
-        # image_height = image1.shape[0]
-        # image_width = image1.shape[1]
-
+        ratio_image = self.config['fire']['ratio_in_rgb_image']  # fire ratio within the RGB image
+        IR2RGB_ratio = rgb_width / ir_width  # resolution ratio between RGB and IR images
+        min_fov = self.config['fov']['min_deg']  # degrees - minimal allowed FOV
+        max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
         
 
         # Reproject and compute homography
@@ -104,9 +107,10 @@ class RealScanManager:
                                           borderValue=np.median(image0))
 
         # Preprocess, compare, cluster, and score
-        image1, image0_proj = preprocess_images(image1, image0_proj, applying=0)
+        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
         diff_map = compute_positive_difference(image0_proj, image1)
-        # diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=None)
+        diff_map = postprocess_difference_map(diff_map, image1, threshold=self.config['postprocessing']['threshold'],
+                                              temp_threshold=self.config['postprocessing']['temp_threshold'])
 
         # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
         min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
@@ -114,18 +118,16 @@ class RealScanManager:
         # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
         centers, label_map, bboxes = find_cluster_centers_conditional(
             diff_map=diff_map,
-            threshold=10,  # Only consider pixels with diff > 10
+            threshold=self.config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
             eps=eps_distance,  # Clustering radius
             min_samples=min_samples,  # Minimum number of points in cluster
-            min_contrast=10  # Contrast-based center selection
+            min_contrast=self.config['dbscan']['min_contrast']  # Contrast-based center selection
         )
         # Compute scores
-        scores = compute_cluster_scores(label_map, image1, GSD) # TODO (Maayan) switch to intentsity parameter according to assaf instrunctions
+        scores = compute_cluster_scores(label_map, image1, GSD, norm_size=self.config['scoring']['norm_size'],
+                                        norm_intensity=self.config['scoring']['norm_intensity']) # TODO (Maayan) switch to intentsity parameter according to assaf instrunctions
 
         # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
-        # Estimate the desired fire size in RGB pixel scale (target size for zoom decision)
-        pixels_RGB_at_patch = patch_length * ratio_patch  # target fire size in RGB pixels
-
         # FOV calculation
         required_fov2 = []
         for bbox in bboxes:
@@ -133,8 +135,8 @@ class RealScanManager:
             height = bbox[3] - bbox[1]
             fire_size_IR = max(width, height)
             fire_size_RGB = fire_size_IR * IR2RGB_ratio
-            fov = hfov1 / (ratio_image * rgb_len / fire_size_RGB)
-            required_fov2.append(round(np.clip(fov, min_fov, max_fov, 2))
+            fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
+            required_fov2.append(round(np.clip(fov, min_fov, max_fov, 2)))
 
         # Return structured result
         results = []
@@ -161,8 +163,8 @@ class RealScanManager:
         bbox_pixels = Reuven_Function(bbox, metadata, world2pixel) # TODO: TBD to Reuven requirements
 
         # === 4. Define crop factors and transformation
-        crop_factors = [1.5 ** 0.5, 2 ** 0.5, 2]
-        image_size = 224
+        crop_factors = self.config['phase2']['crop_factors']
+        image_size = self.config['phase2']['net_image_size']
 
         transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
