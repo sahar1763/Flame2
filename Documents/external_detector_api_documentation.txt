@@ -1,0 +1,239 @@
+openapi: 3.0.3
+info:
+  title: Detector API
+  description: REST API for detector shared memory and metadata management
+  version: 1.0.0
+  x-generated-at: '2025-06-10T16:50:53.012023'
+
+paths:
+  /start:
+    post:
+      summary: Start Detector
+      description: Start the detector process with server configuration
+      operationId: start_detector_start_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDetectorRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+
+  /stop:
+    post:
+      summary: Stop Detector
+      description: Stop the detector process
+      operationId: stop_detector_stop_post
+      responses:
+        '200':
+          description: Successful Response
+
+  /set_data:
+    post:
+      summary: Set Data
+      description: Set the shared memory buffer for the detector
+      operationId: set_data_set_data_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetDataRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+
+components:
+  schemas:
+    StartDetectorRequest:
+      type: object
+      required:
+        - geo_server_address
+        - endpoint
+        - geo_request_message_body
+        - geo_response_message_body
+      properties:
+        geo_server_address:
+          type: string
+          title: Geo Server Address
+          description: Address of the geo server to communicate with (e.g., "http://localhost:8080")
+        endpoint:
+          type: string
+          title: Endpoint
+          description: API endpoint to call on the server
+          default: "/pixel_to_geo"
+        geo_request_message_body:
+          $ref: '#/components/schemas/RequestMessageBody'
+        geo_response_message_body:
+          $ref: '#/components/schemas/ResponseMessageBody'
+      title: StartDetectorRequest
+      description: Request model for starting detector with server configuration
+
+    RequestMessageBody:
+      type: object
+      required:
+        - server_id
+        - body
+      properties:
+        server_id:
+          type: integer
+          title: Server ID
+          description: Server identifier
+        body:
+          type: object
+          required:
+            - transf
+            - pixels
+          properties:
+            transf:
+              type: array
+              items:
+                type: number
+              minItems: 16
+              maxItems: 16
+              title: Transf
+              description: Transformation matrix as a flat array of 16 float64 elements
+            pixels:
+              type: array
+              items:
+                type: array
+                items:
+                  type: number
+                minItems: 2
+                maxItems: 2
+              title: Pixels
+              description: Array of pixel coordinates [x, y]
+          title: Body
+          description: Request body containing transformation matrix and pixels data
+      title: RequestMessageBody
+      description: Request message body containing transformation matrix and pixels data to send to geo registration service
+
+    ResponseMessageBody:
+      type: object
+      required:
+        - geo_coordinates
+      properties:
+        geo_coordinates:
+          type: array
+          items:
+            type: object
+            required:
+              - longitude
+              - latitude
+            properties:
+              longitude:
+                type: number
+                title: Longitude
+                description: Longitude coordinate in decimal degrees
+              latitude:
+                type: number
+                title: Latitude
+                description: Latitude coordinate in decimal degrees
+              altitude:
+                type: number
+                nullable: true
+                title: Altitude
+                description: Altitude in meters above sea level (optional)
+          title: Geo Coordinates
+          description: Array of geo coordinates returned from geo registration service
+        status:
+          type: string
+          nullable: true
+          title: Status
+          description: Status of the geo registration response
+        timestamp:
+          type: integer
+          nullable: true
+          title: Timestamp
+          description: Timestamp of the geo registration response
+      title: ResponseMessageBody
+      description: Response message body containing geo coordinates retrieved from geo registration service
+
+    SetDataRequest:
+      type: object
+      required:
+        - posix_name
+        - single_buffer_size
+        - buffer_offset
+        - header_size
+        - frame_size
+        - frame_shape
+        - transf_size
+        - metadata_size
+      properties:
+        posix_name:
+          type: string
+          title: Posix Name
+        single_buffer_size:
+          type: integer
+          title: Single Buffer Size
+        buffer_offset:
+          type: integer
+          title: Buffer Offset
+        header_size:
+          type: integer
+          title: Header Size
+        frame_size:
+          type: integer
+          title: Frame Size
+        frame_shape:
+          type: array
+          items:
+            type: integer
+          title: Frame Shape
+          description: Array of integers representing frame dimensions (e.g., [height, width, channels])
+        transf_size:
+          type: integer
+          title: Transf Size
+          description: Size of transformation matrix data in bytes (128 bytes for 16 float64 elements)
+        metadata_size:
+          type: integer
+          title: Metadata Size
+      title: SetDataRequest
+      description: Model for setting shared memory buffer information and transformation matrix metadata for the detector
+
+    HTTPValidationError:
+      type: object
+      properties:
+        detail:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          title: Detail
+      title: HTTPValidationError
+
+    ValidationError:
+      type: object
+      required:
+        - loc
+        - msg
+        - type
+      properties:
+        loc:
+          type: array
+          items:
+            oneOf:
+              - type: string
+              - type: integer
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+      title: ValidationError 
