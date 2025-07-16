@@ -1,19 +1,29 @@
 from torchvision import transforms, models
 from PIL import Image
 import yaml
+import importlib.resources as pkg_resources
 
-from utils_Frame import *
-from utils_phase2_flow import *
+import requests
+from typing import List, Tuple, Optional
+
+from wildfire_detector.utils_Frame import *
+from wildfire_detector.utils_phase2_flow import *
 
 class ScanManager:
     def __init__(self, config_path=None):
         # Load config.yaml from package
         if config_path is None:
-            with pkg_resources.files(__package__).joinpath("config.yaml").open("r") as f:
+            with pkg_resources.open_text(__package__, "config.yaml") as f:
                 self.config = yaml.safe_load(f)
         else:
             with open(config_path, "r") as f:
                 self.config = yaml.safe_load(f)
+
+        # Initialize DetectorClient
+        self.detector_client = DetectorClient(
+            server_url=self.config["detector"]["server_url"],  # add to config.yaml
+            geo_server_address=self.config["detector"]["geo_server_address"]
+        )
 
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
@@ -24,12 +34,12 @@ class ScanManager:
         # === Phase 2 - Loading Model ===
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # Load model from package
-        with pkg_resources.files(__package__).joinpath("resnet_fire_classifier.pt") as f:
-            checkpoint = torch.load(f, map_location=torch.device('cpu'))
+        with pkg_resources.files(__package__).joinpath("resnet_fire_classifier.pt").open("rb") as f:
+            checkpoint = torch.load(f, map_location=torch.device('cpu'), weights_only=True)
 
         # Define model and load state
         num_classes = 2
-        resnet = models.resnet18(pretrained=False)
+        resnet = models.resnet18(weights=None) #(pretrained=False)
         num_ftrs = resnet.fc.in_features
         resnet.fc = torch.nn.Linear(num_ftrs, num_classes)
         resnet.load_state_dict(checkpoint["model_state"])
@@ -48,9 +58,18 @@ class ScanManager:
 
         # Create corners:
         pts_image = self.points0_arrange
-        
+
+        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        transf = matrix.astype(float).flatten().tolist()
+
         # Compute corners and store them
-        ground_corners = Reuven_Function(pts_image, metadata, pixel2world) # TBD to Reuven requirements
+        geo_results = self.detector_client.pixels_to_geo(transf, pts_image)
+
+        ground_corners = np.array([
+            g if g is not None else [np.nan, np.nan]
+            for g in geo_results
+        ])
+
         self.corners[frame_id] = ground_corners
 
     # def get_frame(self, frame_id: int) -> np.ndarray:
@@ -93,10 +112,19 @@ class ScanManager:
         IR2RGB_ratio = rgb_width / ir_width  # resolution ratio between RGB and IR images
         min_fov = self.config['fov']['min_deg']  # degrees - minimal allowed FOV
         max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
-        
 
         # Reproject and compute homography
-        pixels_img0_at_img1 = Reuven_Function(corners_0, metadata, world2pixel) # TBD to Reuven requirements
+        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        transf = matrix.astype(float).flatten().tolist()
+
+        pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, corners_0)
+
+        pixels_img0_at_img1 = np.array([
+            g if g is not None else [np.nan, np.nan]
+            for g in pixels_img0_at_img1_list
+        ]) # TODO: Verify the returned format
+
+
         pts_image = self.points0_arrange
         
         H = create_homography(pts_image, pixels_img0_at_img1)
@@ -125,7 +153,7 @@ class ScanManager:
         )
         # Compute scores
         scores = compute_cluster_scores(label_map, image1, GSD, norm_size=self.config['scoring']['norm_size'],
-                                        norm_intensity=self.config['scoring']['norm_intensity']) # TODO (Maayan) switch to intentsity parameter according to assaf instrunctions
+                                        norm_intensity=self.config['scoring']['norm_intensity']) # TODO (Maayan) switch to intensity parameter according to assaf instructions
 
         # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
         # FOV calculation
@@ -145,7 +173,7 @@ class ScanManager:
                 'Frame_index': frame_id,
                 'loc': centers[i],
                 'bbox': bboxes[i],
-                'confidence_pct': scores[i], # TODO (Maayan) switch to intentsity parameter according to assaf instrunctions
+                'confidence_pct': scores[i], # TODO (Maayan) switch to intensity parameter according to assaf instructions
                 'required_fov2': required_fov2[i]
             })
 
@@ -160,7 +188,28 @@ class ScanManager:
         tt0 = time.time()
 
         # === 3. Define bbox
-        bbox_pixels = Reuven_Function(bbox, metadata, world2pixel) # TODO: TBD to Reuven requirements
+        # Reproject and compute homography
+        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        transf = matrix.astype(float).flatten().tolist()
+
+        # Convert bbox [lat1, lon1, lat2, lon2] to [[lon1, lat1], [lon2, lat2]]
+        bbox_geo = [
+            [bbox[1], bbox[0]],  # top-left:  [lon, lat]
+            [bbox[3], bbox[2]]  # bottom-right: [lon, lat]
+        ]
+        bbox_list_pixel = self.detector_client.geos_to_pixels(transf, bbox_geo)
+
+        bbox_pixels_array = np.array([
+            g if g is not None else [np.nan, np.nan]
+            for g in bbox_list_pixel
+        ]) # TODO: Verify the returned format
+
+        bbox_pixels = (
+            np.min(bbox_pixels_array[:, 0]),  # x_min
+            np.min(bbox_pixels_array[:, 1]),  # y_min
+            np.max(bbox_pixels_array[:, 0]),  # x_max
+            np.max(bbox_pixels_array[:, 1])  # y_max
+        ) # TODO: Remove min/max implementation if not needed - based on the return from the detector_client
 
         # === 4. Define crop factors and transformation
         crop_factors = self.config['phase2']['crop_factors']
@@ -212,3 +261,138 @@ class ScanManager:
         print("BBox:", result["bbox"])
 
         return result
+
+
+
+class DetectorClient:
+    def __init__(self,
+                 server_url: str,
+                 geo_server_address: str = "http://localhost:8080",
+                 endpoint: str = "/pixel_to_geo",
+                 server_id: int = 1):
+        self.server_url = server_url.rstrip("/")
+        self.geo_server_address = geo_server_address
+        self.endpoint = endpoint
+        self.server_id = server_id
+
+    def start(self, transf: List[float], pixel: List[float]) -> bool:
+        if len(transf) != 16:
+            raise ValueError("Transformation matrix must be 16 float values")
+
+        payload = {
+            "geo_server_address": self.geo_server_address,
+            "endpoint": self.endpoint,
+            "geo_request_message_body": {
+                "server_id": self.server_id,
+                "body": {
+                    "transf": transf,
+                    "pixels": [pixel]
+                }
+            },
+            "geo_response_message_body": {
+                "geo_coordinates": [],
+                "status": None,
+                "timestamp": None
+            }
+        }
+
+        try:
+            response = requests.post(f"{self.server_url}/start", json=payload)
+            response.raise_for_status()
+            print("Detector started")
+            return True
+        except requests.RequestException as e:
+            print(f" Start failed: {e}")
+            return False
+
+    def stop(self) -> bool:
+        try:
+            response = requests.post(f"{self.server_url}/stop")
+            response.raise_for_status()
+            print(" Detector stopped")
+            return True
+        except requests.RequestException as e:
+            print(f" Stop failed: {e}")
+            return False
+
+    def pixels_to_geo(self, transf: List[float], pixels: List[List[float]]) -> List[Optional[Tuple[float, float]]]:
+        """
+        Sends a list of pixel coordinates and returns list of corresponding (lon, lat) geo coordinates.
+        """
+        if len(transf) != 16:
+            raise ValueError("Transformation matrix must be 16 float values")
+
+        payload = {
+            "geo_server_address": self.geo_server_address,
+            "endpoint": self.endpoint,
+            "geo_request_message_body": {
+                "server_id": self.server_id,
+                "body": {
+                    "transf": transf,
+                    "pixels": pixels  # send full list
+                }
+            },
+            "geo_response_message_body": {
+                "geo_coordinates": [],
+                "status": None,
+                "timestamp": None
+            }
+        }
+
+        try:
+            response = requests.post(f"{self.server_url}/start", json=payload)
+            response.raise_for_status()
+            data = response.json()
+
+            coords = data.get("geo_coordinates", [])
+            results = []
+            for c in coords:
+                if c is None or "longitude" not in c or "latitude" not in c:
+                    results.append(None)
+                else:
+                    results.append((c["longitude"], c["latitude"]))
+
+            return results
+
+        except requests.RequestException as e:
+            print(f"pixel_to_geo (batch) failed: {e}")
+            return [None] * len(pixels)
+
+    def geos_to_pixels(self, transf: List[float], geo_coords: List[List[float]]) -> List[Optional[List[float]]]:
+        """
+        Converts geo coordinates (lon, lat) to image pixels using the geo server.
+        """
+        if len(transf) != 16:
+            raise ValueError("Transformation matrix must have 16 float values")
+
+        payload = {
+            "geo_server_address": self.geo_server_address,
+            "endpoint": "/geo_to_pixel",  # TODO: update
+            "geo_request_message_body": {
+                "server_id": self.server_id,
+                "body": {
+                    "transf": transf,
+                    "pixels": geo_coords
+                }
+            },
+            "geo_response_message_body": {
+                "geo_coordinates": [],
+                "status": None,
+                "timestamp": None
+            }
+        }
+
+        try:
+            response = requests.post(f"{self.server_url}/start", json=payload)
+            response.raise_for_status()
+            coords = response.json().get("geo_coordinates", [])
+
+            return [
+                [c["x"], c["y"]] if c and "x" in c and "y" in c else None
+                for c in coords
+            ]
+
+        except requests.RequestException as e:
+            print(f"geo_to_pixel failed: {e}")
+            return [None] * len(geo_coords)
+

@@ -70,3 +70,13 @@ scoring:
 phase2:
   net_image_size: 224                 # Input size expected by the classification network (in pixels)
   crop_factors: [1.2247, 1.4142, 2.0] # Factors used to crop around detected fire regions at multiple scales
+  
+
+# ---------------------------------------------------
+# Detector Client parameters
+# ---------------------------------------------------  
+  
+detector:
+  server_url: "http://127.0.0.1:8000"
+  geo_server_address: "http://localhost:8080"
+

@@ -1,0 +1,2 @@
+recursive-include wildfire_detector *.yaml
+recursive-include wildfire_detector *.pt
