@@ -47,6 +47,65 @@ class ScanManager:
         resnet.eval()
         self.model = resnet
 
+        # <<< Warm up >>>
+        print("Start warmup")
+        self._warmup_phase2()
+        print("End warmup")
+
+
+    def _warmup_phase2(self) -> None:
+        """
+        Run a full phase2 pass with dummy RGB image + bbox to warm pipelines:
+        PIL transforms, tensor move, model forward, softmax, and postprocess.
+        """
+        try:
+            image_rgb_size = self.config['image']['rgb_size']
+            H, W = image_rgb_size[1], image_rgb_size[0]
+            dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
+
+            # bbox at the center
+            cx, cy, r = W // 2, H // 2, 140
+            dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
+
+            dummy_md = {
+                "uav": {
+                    "altitude_agl_meters": 2400.0,
+                    "roll_deg": 0.5,
+                    "pitch_deg": -1.2,
+                    "yaw_deg": 45.0,
+                },
+                "payload": {
+                    "pitch_deg ": -12.0,
+                    "azimuth_deg ": 128.0,
+                    "field_of_view_deg ": 2.5,
+                    "resolution_px": [1920, 1080],
+                },
+                "geolocation": {
+                    "latitude": 31.0461,
+                    "transformation_matrix": np.eye(4).tolist(),
+                    "longitude": 34.8516,
+                },
+                "investigation_parameters": {
+                    "detection_latitude": 31.0421,
+                    "detection_longitude ": 34.8516,
+                    "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
+
+                },
+                "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
+            }
+
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+
+            _ = self.phase2(dummy_img, dummy_bbox, dummy_md)
+
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+
+        except Exception as e:
+            print(f"[phase2 warmup] skipped: {e}")
+
+
     def phase0(self, frame: np.ndarray, metadata: dict):
         """
         Store initial scan frame and its projected corners.
@@ -58,12 +117,13 @@ class ScanManager:
 
         # Create corners:
         pts_image = self.points0_arrange
+        pixels = [[int(x), int(y)] for (y, x) in pts_image]
 
         matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Compute corners and store them
-        geo_results = self.detector_client.pixels_to_geo(transf, pts_image)
+        geo_results = self.detector_client.pixels_to_geo(transf, pixels)
 
         ground_corners = np.array([
             g if g is not None else [np.nan, np.nan]
@@ -71,13 +131,6 @@ class ScanManager:
         ])
 
         self.corners[frame_id] = ground_corners
-
-    # def get_frame(self, frame_id: int) -> np.ndarray:
-    #     return self.frames.get(frame_id, None)
-    #
-    # def get_corners(self, frame_id: int) -> np.ndarray:
-    #     return self.corners.get(frame_id, None)
-
     
     def phase1(self, image1: np.ndarray, metadata: dict):
         """
@@ -117,13 +170,19 @@ class ScanManager:
         matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
-        pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, corners_0)
+        # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
+        geo_coords = [
+            [c[1], c[0]] if c is not None else None
+            for c in corners_0
+        ]
+
+        # Get projected pixel coordinates in image1
+        pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, geo_coords)
 
         pixels_img0_at_img1 = np.array([
             g if g is not None else [np.nan, np.nan]
             for g in pixels_img0_at_img1_list
         ]) # TODO: Verify the returned format
-
 
         pts_image = self.points0_arrange
         
@@ -179,30 +238,31 @@ class ScanManager:
 
         return results
 
-
     def phase2(self, image1: np.ndarray, bbox, metadata: dict):
         """
         Process a new RGB frame.
         """
         # Using transformation function to convert World coordinates to RGB image coordinates
-        tt0 = time.time()
+        tt0 = time.perf_counter()
 
         # === 3. Define bbox
         # Reproject and compute homography
         matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
-        # Convert bbox [lat1, lon1, lat2, lon2] to [[lon1, lat1], [lon2, lat2]]
+        # Convert bbox [lat1, lon1, lat2, lon2] to [[lat1, lon1], [lat2, lon2]]
         bbox_geo = [
-            [bbox[1], bbox[0]],  # top-left:  [lon, lat]
-            [bbox[3], bbox[2]]  # bottom-right: [lon, lat]
+            [bbox[0], bbox[1]],  # top-left
+            [bbox[2], bbox[3]]  # bottom-right
         ]
+
+        # Perform geo-to-pixel projection
         bbox_list_pixel = self.detector_client.geos_to_pixels(transf, bbox_geo)
 
         bbox_pixels_array = np.array([
             g if g is not None else [np.nan, np.nan]
             for g in bbox_list_pixel
-        ]) # TODO: Verify the returned format
+        ])
 
         bbox_pixels = (
             np.min(bbox_pixels_array[:, 0]),  # x_min
@@ -236,7 +296,7 @@ class ScanManager:
 
         test_tensors = [t for t in test_tensors if t.numel() > 0]
 
-        total_time = time.time() - tt0
+        total_time = time.perf_counter() - tt0
         print(f"\n=== Inference Timing for Cropping === {total_time * 1000:.2f} msec\n")
 
         # tt1 = time.time()
@@ -264,15 +324,15 @@ class ScanManager:
 
 
 
+
+
 class DetectorClient:
     def __init__(self,
                  server_url: str,
                  geo_server_address: str = "http://localhost:8080",
-                 endpoint: str = "/pixel_to_geo",
                  server_id: int = 1):
         self.server_url = server_url.rstrip("/")
         self.geo_server_address = geo_server_address
-        self.endpoint = endpoint
         self.server_id = server_id
 
     def start(self, transf: List[float], pixel: List[float]) -> bool:
@@ -281,16 +341,21 @@ class DetectorClient:
 
         payload = {
             "geo_server_address": self.geo_server_address,
-            "endpoint": self.endpoint,
+            "endpoint": "/pixel_to_geo",
             "geo_request_message_body": {
                 "server_id": self.server_id,
                 "body": {
                     "transf": transf,
-                    "pixels": [pixel]
+                    "pixels": {
+                        "ptc": {
+                            "x": pixel[0],
+                            "y": pixel[1]
+                        }
+                    }
                 }
             },
             "geo_response_message_body": {
-                "geo_coordinates": [],
+                "geo_coordinates": {},
                 "status": None,
                 "timestamp": None
             }
@@ -302,97 +367,115 @@ class DetectorClient:
             print("Detector started")
             return True
         except requests.RequestException as e:
-            print(f" Start failed: {e}")
+            print(f"Start failed: {e}")
             return False
 
     def stop(self) -> bool:
         try:
             response = requests.post(f"{self.server_url}/stop")
             response.raise_for_status()
-            print(" Detector stopped")
+            print("Detector stopped")
             return True
         except requests.RequestException as e:
-            print(f" Stop failed: {e}")
+            print(f"Stop failed: {e}")
             return False
 
     def pixels_to_geo(self, transf: List[float], pixels: List[List[float]]) -> List[Optional[Tuple[float, float]]]:
-        """
-        Sends a list of pixel coordinates and returns list of corresponding (lon, lat) geo coordinates.
-        """
         if len(transf) != 16:
             raise ValueError("Transformation matrix must be 16 float values")
 
-        payload = {
-            "geo_server_address": self.geo_server_address,
-            "endpoint": self.endpoint,
-            "geo_request_message_body": {
-                "server_id": self.server_id,
-                "body": {
-                    "transf": transf,
-                    "pixels": pixels  # send full list
+        results = []
+
+        for pixel in pixels:
+            payload = {
+                "geo_server_address": self.geo_server_address,
+                "endpoint": "/pixel_to_geo",
+                "geo_request_message_body": {
+                    "server_id": self.server_id,
+                    "body": {
+                        "transf": transf,
+                        "pixels": {
+                            "ptc": {
+                                "x": pixel[0],
+                                "y": pixel[1]
+                            }
+                        }
+                    }
+                },
+                "geo_response_message_body": {
+                    "geo_coordinates": {},
+                    "status": None,
+                    "timestamp": None
                 }
-            },
-            "geo_response_message_body": {
-                "geo_coordinates": [],
-                "status": None,
-                "timestamp": None
             }
-        }
 
-        try:
-            response = requests.post(f"{self.server_url}/start", json=payload)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = requests.post(f"{self.server_url}/start", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                coords = data.get("geo_coordinates", {}).get("ptc", None)
 
-            coords = data.get("geo_coordinates", [])
-            results = []
-            for c in coords:
-                if c is None or "longitude" not in c or "latitude" not in c:
-                    results.append(None)
+                if coords and "x" in coords and "y" in coords:
+                    results.append((coords["x"], coords["y"]))
                 else:
-                    results.append((c["longitude"], c["latitude"]))
+                    results.append(None)
 
-            return results
+            except requests.RequestException as e:
+                print(f"pixel_to_geo failed: {e}")
+                results.append(None)
 
-        except requests.RequestException as e:
-            print(f"pixel_to_geo (batch) failed: {e}")
-            return [None] * len(pixels)
+        return results
 
     def geos_to_pixels(self, transf: List[float], geo_coords: List[List[float]]) -> List[Optional[List[float]]]:
-        """
-        Converts geo coordinates (lon, lat) to image pixels using the geo server.
-        """
         if len(transf) != 16:
-            raise ValueError("Transformation matrix must have 16 float values")
+            raise ValueError("Transformation matrix must be 16 float values")
 
-        payload = {
-            "geo_server_address": self.geo_server_address,
-            "endpoint": "/geo_to_pixel",  # TODO: update
-            "geo_request_message_body": {
-                "server_id": self.server_id,
-                "body": {
-                    "transf": transf,
-                    "pixels": geo_coords
+        results = []
+
+        for coord in geo_coords:
+            if len(coord) != 3:
+                results.append(None)
+                continue
+
+            lon, lat, alt = coord
+
+            payload = {
+                "geo_server_address": self.geo_server_address,
+                "endpoint": "/geo_to_pixel",
+                "geo_request_message_body": {
+                    "server_id": self.server_id,
+                    "body": {
+                        "transf": transf,
+                        "coords": {
+                            "ptc": {
+                                "x": lon,
+                                "y": lat,
+                                "z": alt
+                            }
+                        }
+                    }
+                },
+                "geo_response_message_body": {
+                    "geo_coordinates": {},
+                    "status": None,
+                    "timestamp": None
                 }
-            },
-            "geo_response_message_body": {
-                "geo_coordinates": [],
-                "status": None,
-                "timestamp": None
             }
-        }
 
-        try:
-            response = requests.post(f"{self.server_url}/start", json=payload)
-            response.raise_for_status()
-            coords = response.json().get("geo_coordinates", [])
+            try:
+                response = requests.post(f"{self.server_url}/start", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                ptc = data.get("geo_coordinates", {}).get("ptc", None)
 
-            return [
-                [c["x"], c["y"]] if c and "x" in c and "y" in c else None
-                for c in coords
-            ]
+                if ptc and "x" in ptc and "y" in ptc:
+                    results.append([ptc["x"], ptc["y"]])
+                else:
+                    results.append(None)
 
-        except requests.RequestException as e:
-            print(f"geo_to_pixel failed: {e}")
-            return [None] * len(geo_coords)
+            except requests.RequestException as e:
+                print(f"geo_to_pixel failed: {e}")
+                results.append(None)
+
+        return results
 

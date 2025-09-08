@@ -1,3 +1,13 @@
+# Create the package:
+# pip install build
+# python -m build
+# pip install dist/wildfire_detector-0.1.1-py3-none-any.whl
+
+# Install the package:
+# pip install dist/wildfire_detector-0.1.1-py3-none-any.whl
+# from wildfire_detector.function_class_demo import ScanManager
+
+
 import numpy as np
 from wildfire_detector.function_class_demo import ScanManager
 

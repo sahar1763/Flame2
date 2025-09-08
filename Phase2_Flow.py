@@ -9,7 +9,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
 
 
-    
+
 # def predict_crops_majority_vote(crops, model, bbox, device,
 #                                  original_image=None,
 #                                  crops_np=None,
@@ -34,7 +34,7 @@ print('Using device:', device)
 
 #     model.eval()
 #     batch = torch.stack(crops).to(device)
-    
+
 #     with torch.no_grad():
 #         outputs = model(batch)
 #         probs = F.softmax(outputs, dim=1)
@@ -78,11 +78,11 @@ print('Using device:', device)
 
 # # Input / Parameters:
 # bbox = # Fire BBox in world coordinates
-# image1 = 
-# IR2RGB_ratio = 
+# image1 =
+# IR2RGB_ratio =
 # HFOV = # IR Fov in Phase1
-# required_fov2 = 
-# ratio_patch = 
+# required_fov2 =
+# ratio_patch =
 
 
 
@@ -92,7 +92,7 @@ print('Using device:', device)
 
 # Load and convert to RGB
 
-image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00216-fire-rgb-flame3.JPG"
+image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00039-fire-rgb-flame3.JPG"
 image_bgr = cv2.imread(image_path)
 image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
@@ -165,15 +165,19 @@ resnet.eval()
 total_time = time.time() - tt1
 print(f"\n=== Inference Timing For Loading the Model === {total_time*1000:.2f} msec\n")
 
-result = predict_crops_majority_vote(
-    test_tensors,
-    resnet,
-    bbox_pixels,
-    device,
-    original_image=image1,
-    crops_np=cropped_images_np,
-    plot=False
-)
+i = 0
+while i <= 10:
+    result = predict_crops_majority_vote(
+        test_tensors,
+        resnet,
+        bbox_pixels,
+        device,
+        original_image=image1,
+        crops_np=cropped_images_np,
+        plot=False
+    )
+
+    i = i + 1
 
 
 print("Final Prediction:", result["final_prediction"])

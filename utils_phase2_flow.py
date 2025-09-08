@@ -99,29 +99,41 @@ def predict_crops_majority_vote(crops, model, bbox, device,
 
     times = {}
 
-    t0 = time.time()
+    t0 = time.perf_counter()
     model.eval()
 
     # Stage 1: Stack crops
-    t1 = time.time()
+    t1 = time.perf_counter()
     batch = torch.stack(crops)
-    times['stack'] = time.time() - t1
+    times['stack'] = time.perf_counter() - t1
 
     # Stage 2: Move to device
-    t2 = time.time()
+    t2 = time.perf_counter()
     batch = batch.to(device)
-    times['to_device'] = time.time() - t2
+    times['to_device'] = time.perf_counter() - t2
 
-    # Stage 3: Inference
-    t3 = time.time()
+    # # Stage 3: Inference
+    # t3 = time.time()
+    # with torch.no_grad():
+    #     outputs = model(batch)
+    #     probs = F.softmax(outputs, dim=1)
+    #     preds = torch.argmax(probs, dim=1)
+    # times['inference'] = time.time() - t3
+
+    # Stage 3: Inference + softmax + argmax (everything GPU-related)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    t3 = time.perf_counter()
     with torch.no_grad():
         outputs = model(batch)
         probs = F.softmax(outputs, dim=1)
         preds = torch.argmax(probs, dim=1)
-    times['inference'] = time.time() - t3
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+    times['inference'] = time.perf_counter() - t3
 
     # Stage 4: Post-processing
-    t4 = time.time()
+    t4 = time.perf_counter()
     pred_labels = [label_names[p.item()] for p in preds]
     confidence_scores = probs.max(dim=1).values.cpu().numpy().tolist()
     fire_votes = (preds == 1).sum().item()
@@ -129,9 +141,11 @@ def predict_crops_majority_vote(crops, model, bbox, device,
     final_class = 1 if vote_ratio > 0.6 else 0
     final_label = label_names[final_class]
     avg_conf = probs[:, final_class].mean().item()
-    times['postprocess'] = time.time() - t4
+    times['postprocess'] = time.perf_counter() - t4
 
-    total_time = time.time() - t0
+    total_time = time.perf_counter() - t0
+
+    # === Print timing breakdown ===
     print(f"\n=== Inference Timing Breakdown ===")
     for k, v in times.items():
         print(f"{k:>12}: {v * 1000:.2f} ms")
@@ -153,7 +167,5 @@ def predict_crops_majority_vote(crops, model, bbox, device,
         "final_prediction": final_label,
         "confidence": avg_conf,
         "bbox": bbox
-    }
-
-
+    } # TODO: Update the return based on ICD
 

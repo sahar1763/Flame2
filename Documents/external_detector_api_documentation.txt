@@ -63,105 +63,25 @@ components:
       type: object
       required:
         - geo_server_address
-        - endpoint
-        - geo_request_message_body
-        - geo_response_message_body
+        - pixel_to_geo_endpoint
+        - geo_to_pixel_endpoint
       properties:
         geo_server_address:
           type: string
           title: Geo Server Address
           description: Address of the geo server to communicate with (e.g., "http://localhost:8080")
-        endpoint:
+        pixel_to_geo_endpoint:
           type: string
-          title: Endpoint
-          description: API endpoint to call on the server
+          title: Pixel to Geo Endpoint
+          description: API endpoint to call on the server for pixel to geo conversion
           default: "/pixel_to_geo"
-        geo_request_message_body:
-          $ref: '#/components/schemas/RequestMessageBody'
-        geo_response_message_body:
-          $ref: '#/components/schemas/ResponseMessageBody'
-      title: StartDetectorRequest
-      description: Request model for starting detector with server configuration
-
-    RequestMessageBody:
-      type: object
-      required:
-        - server_id
-        - body
-      properties:
-        server_id:
-          type: integer
-          title: Server ID
-          description: Server identifier
-        body:
-          type: object
-          required:
-            - transf
-            - pixels
-          properties:
-            transf:
-              type: array
-              items:
-                type: number
-              minItems: 16
-              maxItems: 16
-              title: Transf
-              description: Transformation matrix as a flat array of 16 float64 elements
-            pixels:
-              type: array
-              items:
-                type: array
-                items:
-                  type: number
-                minItems: 2
-                maxItems: 2
-              title: Pixels
-              description: Array of pixel coordinates [x, y]
-          title: Body
-          description: Request body containing transformation matrix and pixels data
-      title: RequestMessageBody
-      description: Request message body containing transformation matrix and pixels data to send to geo registration service
-
-    ResponseMessageBody:
-      type: object
-      required:
-        - geo_coordinates
-      properties:
-        geo_coordinates:
-          type: array
-          items:
-            type: object
-            required:
-              - longitude
-              - latitude
-            properties:
-              longitude:
-                type: number
-                title: Longitude
-                description: Longitude coordinate in decimal degrees
-              latitude:
-                type: number
-                title: Latitude
-                description: Latitude coordinate in decimal degrees
-              altitude:
-                type: number
-                nullable: true
-                title: Altitude
-                description: Altitude in meters above sea level (optional)
-          title: Geo Coordinates
-          description: Array of geo coordinates returned from geo registration service
-        status:
+        geo_to_pixel_endpoint:
           type: string
-          nullable: true
-          title: Status
-          description: Status of the geo registration response
-        timestamp:
-          type: integer
-          nullable: true
-          title: Timestamp
-          description: Timestamp of the geo registration response
-      title: ResponseMessageBody
-      description: Response message body containing geo coordinates retrieved from geo registration service
+          title: Geo to Pixel Endpoint
+          description: API endpoint to call on the server for geo to pixel conversion
+          default: "/geo_to_pixel"
+      title: StartDetectorRequest
+      description: Request model for starting detector with server configuration for both pixel_to_geo and geo_to_pixel endpoints
 
     SetDataRequest:
       type: object
@@ -174,6 +94,7 @@ components:
         - frame_shape
         - transf_size
         - metadata_size
+        - transf
       properties:
         posix_name:
           type: string
@@ -203,6 +124,14 @@ components:
         metadata_size:
           type: integer
           title: Metadata Size
+        transf:
+          type: array
+          items:
+            type: number
+          minItems: 16
+          maxItems: 16
+          title: Transf
+          description: Transformation matrix as a flat array of 16 float64 elements
       title: SetDataRequest
       description: Model for setting shared memory buffer information and transformation matrix metadata for the detector
 
