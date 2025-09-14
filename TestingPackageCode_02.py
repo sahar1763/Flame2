@@ -1,3 +1,10 @@
+import numpy as np
+import cv2
+from huggingface_hub import metadata_update
+
+from wildfire_detector.function_class_demo import ScanManager
+import time
+
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -7,9 +14,7 @@ import random
 import matplotlib.patches as patches
 import yaml
 import time
-
-Scan0 = {}
-
+import copy
 
 
 def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
@@ -31,12 +36,12 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     """
     times = {}
     t0 = time.time()
-    
+
     global Scan0
 
     # # Fire Max Size (length)
     # fire_size = 10 # [m]
-    
+
     # DB_Scan parameters
     min_samples_factor = config['dbscan']['min_samples_factor']
     eps_distance_factor = config['dbscan']['eps_distance_factor']
@@ -62,7 +67,7 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     corners_0 = Scan0["corners0"][Frame_index]
     image0 = Scan0["Scan0_Images"][Frame_index]
-    
+
     pixels_img0_at_img1, corners_1 = Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1)
 
     # Step 1: Define the image corners in pixel coordinates for image1
@@ -71,42 +76,43 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     # Homography
     H_image1_to_image0 = create_homography(pts_image, pixels_img0_at_img1)
-    
+
     # Step 5: Warp image0 into the pixel frame of image1 using the computed homography
     Image0_projected = cv2.warpPerspective(
-        image0,                        # source image to warp
-        H_image1_to_image0,            # transformation from image1 pixels to image0 projection
+        image0,  # source image to warp
+        H_image1_to_image0,  # transformation from image1 pixels to image0 projection
         (image1.shape[1], image1.shape[0]),  # output size (same as image1)
-        cv2.INTER_LINEAR,              # interpolation method
-        borderMode=cv2.BORDER_CONSTANT,           # fill borders with constant value
-        borderValue=np.median(image0)             # use median of image0 for padding
+        cv2.INTER_LINEAR,  # interpolation method
+        borderMode=cv2.BORDER_CONSTANT,  # fill borders with constant value
+        borderValue=np.median(image0)  # use median of image0 for padding
     )
 
     # === Preprocess and Compute Difference ===
 
     # Step 1: Preprocess images (convert to uint8, optionally normalize)
     image1, Image0_projected = preprocess_images(image1, Image0_projected, applying=config['preprocessing']['apply'])
-    
+
     # Step 2: Compute positive difference (changes in image1 that are brighter than image0 projection)
     diff_map = compute_positive_difference(Image0_projected, image1)
-    
+
     # Step 3: Post-process the difference map to suppress noise and irrelevant areas
-    diff_map = postprocess_difference_map(diff_map, image1, threshold=config['postprocessing']['threshold'], temp_threshold=config['postprocessing']['temp_threshold'])
-    
+    diff_map = postprocess_difference_map(diff_map, image1, threshold=config['postprocessing']['threshold'],
+                                          temp_threshold=config['postprocessing']['temp_threshold'])
+
     # === Cluster Detection Based on Difference Map ===
-    
+
     # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
     min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
     min_samples = max(1, min_samples)
     eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
     eps_distance = max(2, eps_distance)
-    
+
     # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
     print(f"min_samples: {min_samples}")
     centers, label_map, bboxes = find_cluster_centers_conditional(
         diff_map=diff_map,
         threshold=config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
-        eps=eps_distance,       # Clustering radius
+        eps=eps_distance,  # Clustering radius
         min_samples=min_samples,  # Minimum number of points in cluster
         min_contrast=config['dbscan']['min_contrast']  # Contrast-based center selection
     )
@@ -118,21 +124,21 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
     # Initialize lists to store computed FOVs per bounding box
     required_fov2 = []  # FOVs based on entire image resolution requirement
-    
+
     # Loop through each detected bounding box
     for bbox in bboxes:
         x_min, y_min, x_max, y_max = bbox
-    
+
         # Compute width and height of the bounding box in IR pixel coordinates
-        width = x_max - x_min + 1 # +1 to include both endpoints (pixel indices are inclusive)
-        height = y_max - y_min + 1 # +1 to include both endpoints (pixel indices are inclusive)
-    
+        width = x_max - x_min + 1  # +1 to include both endpoints (pixel indices are inclusive)
+        height = y_max - y_min + 1  # +1 to include both endpoints (pixel indices are inclusive)
+
         # Take the longer dimension as the dominant fire size
         pixels_IR_at_current = max(width, height)
-    
+
         # Convert fire size from IR pixels to RGB pixels
         pixels_RGB_at_current = pixels_IR_at_current * IR2RGB_ratio
-    
+
         # --- FOV Type 2: Based on whole image resolution requirement ---
         fov2 = HFOV / (ratio_image * rgb_height / pixels_RGB_at_current)
         fov_clipped2 = round(np.clip(fov2, min_fov, max_fov), 2)
@@ -141,19 +147,19 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     total_time = time.time() - t0
     print(f"\n=== Inference Timing Breakdown ===")
-    print(f"{'Total':>12}: {total_time*1000:.2f} ms\n")
-    
+    print(f"{'Total':>12}: {total_time * 1000:.2f} ms\n")
+
     ### ================= Plots ===============================
-    # Saving fig  
+    # Saving fig
     # Create a figure with 3 subplots in a single row
     fig, axs = plt.subplots(1, 4, figsize=(18, 6))
     drone_pos = (x1, y1)
-    range_xy=15000
-    
+    range_xy = 15000
+
     # === Plot 1: Drone position and camera footprint ===
     ax = axs[0]
     ax.plot(*drone_pos, 'ro', label='Drone Position')
-    
+
     # Create closed polygon from corners
     polygon1 = np.vstack([corners_0[0], corners_0[1], corners_0[3], corners_0[2], corners_0[0]])
     ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
@@ -161,7 +167,7 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     polygon2 = np.vstack([corners_1[0], corners_1[1], corners_1[3], corners_1[2], corners_1[0]])
     ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
     ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
-    
+
     # Set axes limits and appearance
     ax.set_xlim(-range_xy, range_xy)
     ax.set_ylim(-range_xy, range_xy)
@@ -171,16 +177,16 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_title("Drone Camera Ground Footprint")
-    
+
     # === Plot 2: Difference map with colorbar ===
     im = axs[1].imshow(diff_map, cmap='gray', vmin=0, vmax=np.max(diff_map))
     axs[1].set_title("Difference Map")
     axs[1].set_xlabel("Pixel X")
     axs[1].set_ylabel("Pixel Y")
-    
+
     # Add colorbar next to subplot 2
     fig.colorbar(im, ax=axs[1], shrink=0.8)
-    
+
     # === Plot 3: Difference map with cluster centers ===
     axs[2].imshow(diff_map, cmap='gray')
     # Overlay red markers at detected cluster centers
@@ -204,13 +210,13 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
     # === Plot 4: Camera footprint ===
     ax = axs[3]
     ax.plot(*drone_pos, 'ro', label='Drone Position')
-    
+
     # Create closed polygon from corners
     ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
     ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
     ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
     ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
-    
+
     # Set axes limits and appearance
     ax.set_aspect('equal')
     ax.grid(True)
@@ -221,19 +227,18 @@ def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
 
     # Create results directory if it doesn't exist
     os.makedirs("results", exist_ok=True)
-    
+
     # Full path to save the figure
     filename = os.path.join("results", f"combined_plot_{Frame_index}.png")
-    
+
     # Adjust layout and save the figure
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
-    
+
     # Close the figure to avoid displaying it
     plt.close(fig)
 
     ### ========================================================
-
 
     # ===================== Outputs ===========================
     results = []
@@ -298,11 +303,10 @@ def test(image1, image0, x1, y1, h1, theta1, phi1, hfov1):
     image_height = image1.shape[0]
     image_width = image1.shape[1]
 
-
     # === Preprocess and Compute Difference ===
 
     # Step 1: Preprocess images (convert to uint8, optionally normalize)
-    image0, image1= preprocess_images(image0, image1, applying=0)
+    image0, image1 = preprocess_images(image0, image1, applying=0)
 
     # Step 2: Compute positive difference (changes in image1 that are brighter than image0 projection)
     diff_map = compute_positive_difference(image0, image1)
@@ -435,62 +439,57 @@ def Phi_Theta_Generation():
     # Build PHI and THETA lists
     PHI = []
     THETA = []
-    
+
     for phi, reps in zip(phi_values, repetitions):
         PHI.extend([phi] * reps)
         step = 360 / reps
         theta_values = [step * i for i in range(reps)]
         THETA.extend(theta_values)
-    
+
     # Convert to numpy arrays (optional)
     PHI = np.array(PHI)
     THETA = np.array(THETA)
 
     return PHI, THETA
 
-def Creating_Scan0(PHI, THETA, x0, y0, h0, hfov0, image0=None):
-    """xxx"""
-    global Scan0
-    corners0 = []
-    Frame_Index = {}
 
+def Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, config):
+    metadata_array = []
     # 1. Generate uniform background values
-    image_height=720
-    image_width=1280
+    image_height, image_width = config['image']['ir_size']
     background_range = (3, 7)
-    
+
     # Prepare image stack
-    if image0 is not None:
-        # Resize if needed
-        image0 = cv2.resize(image0, (image_width, image_height))
-        Scan0_Images = np.repeat(image0[np.newaxis, :, :], PHI.shape[0], axis=0)
-    else:
-        Scan0_Images = np.random.uniform(*background_range, size=(PHI.shape[0], image_height, image_width)).astype(np.uint8)
- 
+    Scan0_Images = np.random.uniform(*background_range, size=(PHI.shape[0], image_height, image_width)).astype(np.uint8)
+
     i = 0
     # Loop over all (PHI, THETA) combinations and draw projected camera footprints
     for Phi, Theta in zip(PHI, THETA):
-        corners0.append(pixel2geo(theta_deg=Theta, phi_deg=Phi, h=h0, x=x0, y=y0, hfov_deg=hfov0))
-        Frame_Index[i] = i
+        metadata_updated = copy.deepcopy(metadata)
+        metadata_updated["uav"]["pitch_deg"] = Phi
+        metadata_updated["uav"]["yaw_deg"] = Theta
+        metadata_updated["uav"]["altitude_agl_meters"] = h0
+        metadata_updated["payload"]["field_of_view_deg"] = hfov0
+        metadata_updated["scan_parameters"]["current_scanned_frame_id"] = i
+        metadata_array.append(metadata_updated)
         i += 1
 
-    Scan0 = {"Scan0_Images": Scan0_Images,
-             "corners0": corners0,
-             "Frame_Index": Frame_Index}
-    
-             
-def Creating_Scan1_Frame(fire_length_pixel):
+    return Scan0_Images, metadata_array
+
+
+def Creating_Scan1_Frame(fire_length_pixel, image_size):
     """xxx"""
     # Generate a synthetic frame (e.g., at time t1) with clustered fire-like patterns
+    image_height, image_width = image_size
     image1, num_clusters, cluster_centers = create_synthetic_image_with_clusters(
-        image_height=720,
-        image_width=1280,
+        image_height=image_height,
+        image_width=image_width,
         background_range=(3, 7),  # Simulate a low-intensity background
-        cluster_value=200,        # Peak intensity for simulated "fire" clusters
+        cluster_value=200,  # Peak intensity for simulated "fire" clusters
         num_clusters_range=(1, 4),
-        cluster_radius_range=(np.round(fire_length_pixel/6), np.round(fire_length_pixel/2))
+        cluster_radius_range=(np.round(fire_length_pixel / 6), np.round(fire_length_pixel / 2))
     )
-    
+
     # # Add uniformly noisy spots to simulate false detections or thermal clutter
     # num_spots = add_uniform_spots(
     #     image1,
@@ -504,43 +503,161 @@ def Creating_Scan1_Frame(fire_length_pixel):
 
     return image1, clusters_num, cluster_centers
 
+def Creating_Phase1_input(PHI, THETA, h0, hfov0, metadata, config):
+    metadata_array = []
+    image_array = []
+    clusters_num_array = []
+    cluster_centers_array = []
 
-def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1=0, y1=7500, h1=2500, hfov1=17.5):
-    """xxx"""
+    # Define standard deviations (σ) for each parameter
+    x_std = 2
+    y_std = 2
+    h_std = 2
+    theta_std = 1
+    phi_std = 0.2
+    hfov_std = 0.1
 
-    image_height = 720
-    image_width = 1280
-    
-    
-    # Compute ground-intersection corners for the second camera position
-    corners_1 = pixel2geo(theta_deg=theta1, phi_deg=phi1, h=h1, x=x1, y=y1, hfov_deg=hfov1)
+    # Fire Max Size (length)
+    fire_size = config['fire']['max_size_m']  # [m]
 
-    # Step 1: Define the image corners in pixel coordinates for image1
-    # Format: [top-left, top-right, bottom-right, bottom-left]
-    pts_image = generate_uniform_grid(image_height, image_width, points_num=4)
-    # pts_image = np.array([
-    #       [0, 0],                                # top-left
-    #       [image_width - 1, 0],                  # top-right
-    #       [image_width - 1, image_height - 1],   # bottom-right
-    #       [0, image_height - 1]                  # bottom-left
-    #   ], dtype=np.float32)
-    
-    # Step 2: Compute homography that maps world coordinates (corners_1) to image1 pixels
-    H_world_to_image1 = create_homography(pts_image, corners_1)
-    
-    # Step 3: Project the world-space corners of image0 (corners_0) into image1's pixel space
-    pixels_img0_at_img1 = project_points_with_homography(corners_0, H_world_to_image1)
+    i = 0
+    for phi, theta in zip(PHI, THETA):
+        # Generate Scan 1 values using Gaussian distribution (mean=0)
+        x1 = x0 + random.gauss(0, x_std)
+        y1 = y0 + random.gauss(0, y_std)
+        h1 = h0 + random.gauss(0, h_std)
+        theta1 = theta + random.gauss(0, theta_std)
+        phi1 = phi + random.gauss(0, phi_std)
+        hfov1 = hfov0 + random.gauss(0, hfov_std)
 
-    return pixels_img0_at_img1, corners_1
+        # Important Calculation
+        rgb_height, rgb_width = config['image']['rgb_size']  # [width, height]
+        ir_height, ir_width = config['image']['ir_size']
+        Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
+        HFOV = hfov1  # Horizontal field of view (degrees)
+        IFOV = HFOV / rgb_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
+        GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
+
+        fire_length_pixel = np.floor(fire_size / GSD)
+        fire_num_pixel = fire_length_pixel**2
+
+        # Creating frame 1 (scan 1)
+        image1, clusters_num, cluster_centers = Creating_Scan1_Frame(fire_length_pixel, config['image']['ir_size'])
+        metadata_updated = copy.deepcopy(metadata)
+        metadata_updated["uav"]["pitch_deg"] = phi1
+        metadata_updated["uav"]["yaw_deg"] = theta1
+        metadata_updated["uav"]["altitude_agl_meters"] = h1
+        metadata_updated["payload"]["field_of_view_deg"] = hfov1
+        metadata_updated["scan_parameters"]["current_scanned_frame_id"] = i
+
+        metadata_array.append(metadata_updated)
+        image_array.append(image1)
+        clusters_num_array.append(clusters_num)
+        cluster_centers_array.append(cluster_centers)
+
+        i = i + 1
+
+    return image_array, metadata_array, clusters_num_array, cluster_centers_array
 
 
 
+# # === Init ScanManager ===
+# sm = ScanManager()
+#
+# # === Create dummy IR image ===
+# ir_height, ir_width = sm.config['image']['ir_size']
+# frame_ir = np.random.randint(0, 255, (ir_height, ir_width), dtype=np.uint8)
+#
+# # ==== IMG 1 ====
+# image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00216-fire-rgb-flame3.JPG"
+# image_bgr = cv2.imread(image_path)
+# image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+#
+# # Step 1: Resize image to 600x600
+# resized = cv2.resize(image_rgb, (600, 600), interpolation=cv2.INTER_LINEAR)
+#
+# # Step 2: Create a black canvas (1080x1920)
+# frame_rgb1 = np.zeros((1080, 1920, 3), dtype=np.uint8)
+#
+# # Step 3: Compute top-left corner to paste the resized image in the center
+# y_offset = (1080 - 600) // 2
+# x_offset = (1920 - 600) // 2
+#
+# # Step 4: Paste resized image into the center of the canvas
+# frame_rgb1[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
+#
+# # ==== IMG 2 ====
+# image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00039-fire-rgb-flame3.JPG"
+# image_bgr = cv2.imread(image_path)
+# image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+#
+# # Step 1: Resize image to 600x600
+# resized = cv2.resize(image_rgb, (600, 600), interpolation=cv2.INTER_LINEAR)
+#
+# # Step 2: Create a black canvas (1080x1920)
+# frame_rgb2 = np.zeros((1080, 1920, 3), dtype=np.uint8)
+#
+# # Step 3: Compute top-left corner to paste the resized image in the center
+# y_offset = (1080 - 600) // 2
+# x_offset = (1920 - 600) // 2
+#
+# # Step 4: Paste resized image into the center of the canvas
+# frame_rgb2[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
+#
+# # === Create dummy metadata ===
+# metadata = {
+#     "uav": {
+#         "altitude_agl_meters": 2400.0,
+#         "roll_deg": 0.5,
+#         "pitch_deg": -1.2,
+#         "yaw_deg": 45.0,
+#     },
+#     "payload": {
+#         "pitch_deg ": -12.0,
+#         "azimuth_deg ": 128.0,
+#         "field_of_view_deg ": 2.5,
+#         "resolution_px": [1920, 1080],
+#     },
+#     "geolocation": {
+#         "latitude": 31.0461,
+#         "transformation_matrix": np.eye(4).tolist(),
+#         "longitude": 34.8516,
+#     },
+#     "investigation_parameters": {
+#         "detection_latitude": 31.0421,
+#         "detection_longitude ": 34.8516,
+#         "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
+#     },
+#     "scan_parameters": {
+#         "current_scanned_frame_id": 35,
+#         "total_scanned_frames": 173,
+#     },
+#     "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
+# }
+# # === Phase 0: Save reference frame and corner projection ===
+# sm.phase0(frame_ir, metadata)
+#
+# # === Phase 1: IR fire detection ===
+# results_phase1 = sm.phase1(frame_ir, metadata)
+# print("\nPhase 1 results:")
+# for res in results_phase1:
+#     print(res)
+#
+# # === Phase 2: RGB fire confirmation ===
+# # Use a dummy bbox (normally comes from phase1)
+# dummy_bbox = [32.1, 34.8, 32.0, 34.9]  # [top_lat, top_lon, bottom_lat, bottom_lon]
+# for i in range(3):
+#     print(f"\n{i}\n")
+#     result_phase2 = sm.phase2(frame_rgb1, dummy_bbox, metadata)
 
-# Entry point for script execution - Original Scenario
+
 if __name__ == "__main__":
 
-    with open("wildfire_detector'/config.yaml", 'r') as file:
-        config = yaml.safe_load(file)
+    # === Init ScanManager ===
+    sm = ScanManager()
+
+    # === Create dummy metadata ===
+    metadata = sm.dummy_md
 
     # Parameters
     x0, y0 = 0, 7500
@@ -557,277 +674,57 @@ if __name__ == "__main__":
     phi_std = 0.2
     hfov_std = 0.1
 
-    # Fire Max Size (length)
-    fire_size = config['fire']['max_size_m'] # [m]
-
-    results = []  # List to store results from all (phi, theta) pairs
-
     # Defining PHI, THETA
     PHI, THETA = Phi_Theta_Generation()
 
-    # Creating scan_0
-    Creating_Scan0(PHI, THETA, x0, y0, h0, hfov0)
+    # Creating scan_0_inputs
+    scan_0_inputs_imgs, scan_0_inputs_metadata = Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, sm.config)
 
-    Frame_index = 0
-    for phi, theta in zip(PHI, THETA):
-        # Generate Scan 1 values using Gaussian distribution (mean=0)
-        x1 = x0 + random.gauss(0, x_std)
-        y1 = y0 + random.gauss(0, y_std)
-        h1 = h0 + random.gauss(0, h_std)
-        theta1 = THETA[Frame_index] + random.gauss(0, theta_std)
-        phi1 = PHI[Frame_index] + random.gauss(0, phi_std)
-        hfov1 = hfov0 + random.gauss(0, hfov_std)
+    for i in range(scan_0_inputs_imgs.shape[0]):
+        frame_ir = scan_0_inputs_imgs[i]
+        metadata = scan_0_inputs_metadata[i]
+        sm.phase0(frame_ir, metadata)
 
-        # Important Calculation
-        rgb_height, rgb_width = config['image']['rgb_size']  # [width, height]
-        ir_height, ir_width = config['image']['ir_size']
-        Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-        HFOV = hfov1  # Horizontal field of view (degrees)
-        IFOV = HFOV / rgb_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-        GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
+    # Creating phase1_inputs
+    phase1_inputs_imgs, phase1_inputs_metadata, clusters_num_array, _ = Creating_Phase1_input(PHI, THETA, h0, hfov0, metadata, sm.config)
 
-        fire_length_pixel = np.floor(fire_size / GSD)
-        fire_num_pixel = fire_length_pixel**2
+    # # Fire Max Size (length)
+    # fire_size = sm.config['fire']['max_size_m']  # [m]
 
-        # Creating frame 1 (scan 1)
-        image1, clusters_num, cluster_centers = Creating_Scan1_Frame(fire_length_pixel)
+    results = []  # List to store results from all (phi, theta) pairs
 
-        result = main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1)
 
-        # Compute performance comparison
-        # num_out = 0  # or however you're computing removed clusters
-        num_clusters_in = clusters_num #- num_out
+    for i in range(len(phase1_inputs_imgs)):
+        frame_ir = phase1_inputs_imgs[i]
+        metadata = phase1_inputs_metadata[i]
+        clusters_num = clusters_num_array[i]
+
+        result = sm.phase1(frame_ir, metadata)
+
         detected = len(result) if result is not None else 0
-        ratio = detected / num_clusters_in if num_clusters_in > 0 else (1 if detected == 0 else 0)
+        ratio = detected / clusters_num if clusters_num > 0 else (1 if detected == 0 else 0)
 
         if result is not None:
             # Attach evaluation values to each detection
             for r in result:
-                r["ground_truth"] = num_clusters_in
+                r["ground_truth"] = clusters_num
                 r["detected"] = detected
                 r["detection_ratio"] = ratio
             results.extend(result)
 
-        Frame_index += 1
 
-    # Save the DataFrame to results/results.csv
+    # Save the DataFrame to results_demoPackage/results.csv
     df = pd.DataFrame(results)
-    csv_path = os.path.join("results", "results.csv")
+    results_dir = "results_demoPackage"
+    os.makedirs(results_dir, exist_ok=True)
+
+    csv_path = os.path.join(results_dir, "results.csv")
     df.to_csv(csv_path, index=False)
     print(df.head())
 
 
-# # Entry point for script execution - Image Comparison
-# if __name__ == "__main__":
-#
-#     # Parameters
-#     x0, y0 = 0, 7500
-#     h0 = 2500
-#     theta0 = 0 # yaw
-#     phi0 = 0   # pitch
-#     hfov0 = 17.5   # horizontal field of view
-#
-#     # Define standard deviations (σ) for each parameter
-#     x_std = 2
-#     y_std = 2
-#     h_std = 2
-#     theta_std = 1
-#     phi_std = 0.2
-#     hfov_std = 0.1
-#
-#     # Fire Max Size (length)
-#     fire_size = 10 # [m]
-#
-#     results = []  # List to store results from all (phi, theta) pairs
-#
-#     # Defining PHI, THETA
-#     PHI, THETA = np.array([0]), np.array([0])
-#
-#     # Creating scan_0
-#
-#     # Image0 - Load the thermal image as-is
-#     # image0 = cv2.imread(r'HeronFlight\extracted_frames\ir_frames\frame_6793.jpg', cv2.IMREAD_UNCHANGED)
-#     # # Option 1: Convert to grayscale (standard luminance formula)
-#     # image0 = cv2.cvtColor(image0, cv2.COLOR_BGR2GRAY)
-#     # # Option 2 (alternative): Use only one channel (if it's duplicated)
-#     # # image_gray = image_color[:, :, 2]  # e.g., Red channel
-#     # # Normalize to 0–255
-#     # image0 = cv2.normalize(image0, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-#     # image0 = image0.astype(np.uint8)
-#
-#     # Path to your CSV file
-#     csv_path = 'dataset_FOR_IAI/tc004_1.csv'
-#
-#     # Load the CSV, skip the first 4 rows and first column (column A)
-#     df = pd.read_csv(csv_path, header=None, skiprows=4, usecols=lambda col: col not in [0])
-#
-#     # Optional: Reset column indices to numeric if needed
-#     df.columns = range(df.shape[1])
-#
-#     # Convert to numpy array with float32 precision
-#     image_array = df.to_numpy(dtype=np.float32)
-#     image_array = image_array[:,1:]
-#     image0 = image_array.astype(np.uint8)
-#     # Resize if needed
-#     image0 = cv2.resize(image0, (1280, 720))
-#
-#     # # Image1 - Load the thermal image as-is
-#     # image1 = cv2.imread(r'HeronFlight\extracted_frames\ir_frames\frame_6796.jpg', cv2.IMREAD_UNCHANGED)
-#     # # Option 1: Convert to grayscale (standard luminance formula)
-#     # image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
-#     # # Option 2 (alternative): Use only one channel (if it's duplicated)
-#     # # image_gray = image_color[:, :, 2]  # e.g., Red channel
-#     # # Resize if needed
-#     # image1 = cv2.resize(image1, (1280, 720))
-#     # # Normalize to 0–255
-#     # image1 = cv2.normalize(image1, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-#     # image1 = image1.astype(np.uint8)
-#
-#     # Path to your CSV file
-#     csv_path = 'dataset_FOR_IAI/tc004_3.csv'
-#
-#     # Load the CSV, skip the first 4 rows and first column (column A)
-#     df = pd.read_csv(csv_path, header=None, skiprows=4, usecols=lambda col: col not in [0])
-#
-#     # Optional: Reset column indices to numeric if needed
-#     df.columns = range(df.shape[1])
-#
-#     # Convert to numpy array with float32 precision
-#     image_array = df.to_numpy(dtype=np.float32)
-#     image_array = image_array[:,1:]
-#     image1 = image_array.astype(np.uint8)
-#     # Resize if needed
-#     image1 = cv2.resize(image1, (1280, 720))
-#
-#     Creating_Scan0(PHI, THETA, x0, y0, h0, hfov0, image0)
-#
-#     #Plotting the images
-#     plt.figure(figsize=(10, 5))
-#     # Plot image0
-#     plt.subplot(1, 2, 1)
-#     cmap0 = 'gray' if len(image0.shape) == 2 else None
-#     plt.imshow(image0, cmap=cmap0)
-#     plt.title('Image 0')
-#     plt.axis('off')
-#
-#     # Plot image1
-#     plt.subplot(1, 2, 2)
-#     cmap1 = 'gray' if len(image1.shape) == 2 else None
-#     plt.imshow(image1, cmap=cmap1)
-#     plt.title('Image 1')
-#     plt.axis('off')
-#
-#     plt.tight_layout()
-#     plt.show()
-#
-#
-#     Frame_index = 0
-#     for phi, theta in zip(PHI, THETA):
-#         # Generate Scan 1 values using Gaussian distribution (mean=0)
-#         x1 = x0 + random.gauss(0, x_std)
-#         y1 = y0 + random.gauss(0, y_std)
-#         h1 = h0 + random.gauss(0, h_std)
-#         theta1 = THETA[Frame_index] + random.gauss(0, theta_std)
-#         phi1 = PHI[Frame_index] + random.gauss(0, phi_std)
-#         hfov1 = hfov0 + random.gauss(0, hfov_std)
-#
-#         # Important Calculation
-#         # Calculations
-#         Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-#         HFOV = hfov1  # Horizontal field of view (degrees)
-#         IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-#         GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
-#
-#         fire_length_pixel = np.floor(fire_size / GSD)
-#         fire_num_pixel = fire_length_pixel**2
-#         print(f'fire size in pixels {fire_num_pixel}')
-#
-#
-#         result = main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1)
-#
-#         # # Compute performance comparison
-#         # num_out = 0  # or however you're computing removed clusters
-#         # num_clusters_in = clusters_num - num_out
-#         # detected = len(result) if result is not None else 0
-#         # ratio = detected / num_clusters_in if num_clusters_in > 0 else (1 if detected == 0 else 0)
-#
-#         if result is not None:
-#             # Attach evaluation values to each detection
-#             # for r in result:
-#                 # r["ground_truth"] = num_clusters_in
-#                 # r["detected"] = detected
-#                 # r["detection_ratio"] = ratio
-#             results.extend(result)
-#
-#         Frame_index += 1
-#
-#     # Save the DataFrame to results/results.csv
-#     df = pd.DataFrame(results)
-#     csv_path = os.path.join("results", "results.csv")
-#     df.to_csv(csv_path, index=False)
-#     print(df.head())
+    print("OK")
 
-# if __name__ == "__main__":
-
-#     # Parameters
-#     x1, y1 = 0, 7500
-#     h1 = 2500
-#     theta1 = 45  # yaw
-#     phi1 = 0 # pitch
-#     hfov1= 17.5  # horizontal field of view
-
-#     # Load the thermal image as-is
-#     image0 = cv2.imread(r'HeronFlight\extracted_frames\ir_frames\frame_6793.jpg', cv2.IMREAD_UNCHANGED)
-#     # Option 1: Convert to grayscale (standard luminance formula)
-#     image0 = cv2.cvtColor(image0, cv2.COLOR_BGR2GRAY)
-#     # Option 2 (alternative): Use only one channel (if it's duplicated)
-#     # image_gray = image_color[:, :, 2]  # e.g., Red channel
-#     # Normalize to 0–255
-#     image0 = cv2.normalize(image0, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-#     image0 = image0.astype(np.uint8)
-
-
-#     # Load the thermal image as-is
-#     image1 = cv2.imread(r'HeronFlight\extracted_frames\ir_frames\frame_6793.jpg', cv2.IMREAD_UNCHANGED)
-#     # Option 1: Convert to grayscale (standard luminance formula)
-#     image1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
-#     # Option 2 (alternative): Use only one channel (if it's duplicated)
-#     # image_gray = image_color[:, :, 2]  # e.g., Red channel
-#     # Normalize to 0–255
-#     image1 = cv2.normalize(image1, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
-#     image1 = image1.astype(np.uint8)
-
-#     print(image1.shape)
-
-#     import matplotlib
-
-#     matplotlib.use('TkAgg')  # Force external window for plots
-#     import matplotlib.pyplot as plt
-
-#     # Create histograms for image0 and image1
-#     plt.figure(figsize=(12, 5))
-
-#     # Histogram for image0
-#     plt.subplot(1, 2, 1)
-#     plt.hist(image0.ravel(), bins=256, range=(0, 255), color='blue', alpha=0.7)
-#     plt.title("Histogram of Image 0")
-#     plt.xlabel("Pixel Intensity")
-#     plt.ylabel("Frequency")
-
-#     # Histogram for image1
-#     plt.subplot(1, 2, 2)
-#     plt.hist(image1.ravel(), bins=256, range=(0, 255), color='green', alpha=0.7)
-#     plt.title("Histogram of Image 1")
-#     plt.xlabel("Pixel Intensity")
-#     plt.ylabel("Frequency")
-
-#     plt.tight_layout()
-
-#     # Calculate and print total number of pixels (sum of histogram bins)
-#     hist_vals, _ = np.histogram(image1, bins=256, range=(0, 255))
-#     print("Total pixel count from histogram (image1):", np.sum(hist_vals))
-
-#     plt.show()
 
 
 

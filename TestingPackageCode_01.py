@@ -48,19 +48,34 @@ frame_rgb2[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
 
 # === Create dummy metadata ===
 metadata = {
-    "scan_parameters": {
-        "current_scanned_frame_id": 3
-    },
     "uav": {
-        "altitude_agl_meters": 50.0
+        "altitude_agl_meters": 2400.0,
+        "roll_deg": 0.5,
+        "pitch_deg": -1.2,
+        "yaw_deg": 45.0,
     },
     "payload": {
-        "pitch_deg": 10.0,
-        "field_of_view_deg": 45.0
+        "pitch_deg ": -12.0,
+        "azimuth_deg ": 128.0,
+        "field_of_view_deg ": 2.5,
+        "resolution_px": [1920, 1080],
     },
-    "transformation_matrix": np.eye(4).tolist()  # Identity for test
+    "geolocation": {
+        "latitude": 31.0461,
+        "transformation_matrix": np.eye(4).tolist(),
+        "longitude": 34.8516,
+    },
+    "investigation_parameters": {
+        "detection_latitude": 31.0421,
+        "detection_longitude ": 34.8516,
+        "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
+    },
+    "scan_parameters": {
+        "current_scanned_frame_id": 35,
+        "total_scanned_frames": 173,
+    },
+    "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
 }
-
 # === Phase 0: Save reference frame and corner projection ===
 sm.phase0(frame_ir, metadata)
 

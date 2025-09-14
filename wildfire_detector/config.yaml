@@ -3,8 +3,8 @@
 # ---------------------------------------------------
 
 image:
-  ir_size: [1280, 720]          # IR image resolution [width, height]
-  rgb_size: [1920, 1080]        # RGB image resolution [width, height]
+  ir_size: [720, 1280]          # IR image resolution [height, width]
+  rgb_size: [1080, 1920]        # RGB image resolution [height, width]
 
 # ---------------------------------------------------
 # Camera Field of View (FOV)

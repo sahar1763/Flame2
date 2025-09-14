@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional
 
 from wildfire_detector.utils_Frame import *
 from wildfire_detector.utils_phase2_flow import *
+from wildfire_detector.utils_simulation import *
 
 class ScanManager:
     def __init__(self, config_path=None):
@@ -29,7 +30,7 @@ class ScanManager:
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
         self.corners = {}   # frame_id: corners. Format: [top-left, top-right, bottom-right, bottom-left]
-        ir_width, ir_height = self.config['image']['ir_size']
+        ir_height, ir_width = self.config['image']['ir_size']
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
         # === Phase 2 - Loading Model ===
@@ -60,14 +61,14 @@ class ScanManager:
         """
         try:
             image_rgb_size = self.config['image']['rgb_size']
-            H, W = image_rgb_size[1], image_rgb_size[0]
+            H, W = image_rgb_size[0], image_rgb_size[1]
             dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
 
             # bbox at the center
             cx, cy, r = W // 2, H // 2, 140
             dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
 
-            dummy_md = {
+            self.dummy_md = {
                 "uav": {
                     "altitude_agl_meters": 2400.0,
                     "roll_deg": 0.5,
@@ -75,9 +76,9 @@ class ScanManager:
                     "yaw_deg": 45.0,
                 },
                 "payload": {
-                    "pitch_deg ": -12.0,
-                    "azimuth_deg ": 128.0,
-                    "field_of_view_deg ": 2.5,
+                    "pitch_deg": -12.0,
+                    "azimuth_deg": 128.0,
+                    "field_of_view_deg": 2.5,
                     "resolution_px": [1920, 1080],
                 },
                 "geolocation": {
@@ -87,9 +88,12 @@ class ScanManager:
                 },
                 "investigation_parameters": {
                     "detection_latitude": 31.0421,
-                    "detection_longitude ": 34.8516,
-                    "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
-
+                    "detection_longitude": 34.8516,
+                    "detected_bounding_box": [31.1, 34.8, 31.0, 34.9]
+                },
+                "scan_parameters": {
+                    "current_scanned_frame_id": 35,
+                    "total_scanned_frames": 173,
                 },
                 "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
             }
@@ -97,7 +101,7 @@ class ScanManager:
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
-            _ = self.phase2(dummy_img, dummy_bbox, dummy_md)
+            _ = self.phase2(dummy_img, dummy_bbox, self.dummy_md)
 
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
@@ -115,40 +119,142 @@ class ScanManager:
         # Store the frame
         self.frames[frame_id] = frame.copy()
 
-        print(f"frame_id: {frame_id}")
+        # Create corners:
+        pts_image = self.points0_arrange
 
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        transf = matrix.astype(float).flatten().tolist()
+
+        img_size = self.config["image"]["ir_size"]
+        phi_deg = metadata["uav"]["pitch_deg"]
+        theta_deg = metadata["uav"]["yaw_deg"]
+        h = metadata["uav"]["altitude_agl_meters"]
+        hfov_deg = metadata["payload"]["field_of_view_deg"]
+        ground_corners = pixel2geo(theta_deg=theta_deg, phi_deg=phi_deg, h=h, hfov_deg=hfov_deg, img_size=img_size)
+
+        # pixels = [[int(x), int(y)] for (y, x) in pts_image]
+        #
+        # # Compute corners and store them
+        # geo_results = self.detector_client.pixels_to_geo(transf, pixels)
+        #
+        # ground_corners = np.array([
+        #     g if g is not None else [np.nan, np.nan]
+        #     for g in geo_results
+        # ])
+
+        self.corners[frame_id] = ground_corners
     
     def phase1(self, image1: np.ndarray, metadata: dict):
         """
         Process a new IR frame using stored Scan0 reference.
         """
-        frame_id = metadata["scan_parameters"]["current_scanned_frame_id"] # []
-        h1 = metadata["uav"]["altitude_agl_meters"] # [m]
-        phi1 = metadata["payload"]["pitch_deg"] # [deg] TODO: regarding to world or payload
-        hfov1 = metadata["payload"]["field_of_view_deg"] # [deg]
+        frame_id = metadata["scan_parameters"]["current_scanned_frame_id"]  # []
+        h1 = metadata["uav"]["altitude_agl_meters"]  # [m]
+        phi1 = metadata["payload"]["pitch_deg"]  # [deg] TODO: regarding to world or payload
+        hfov1 = metadata["payload"]["field_of_view_deg"]  # [deg]
 
+        # Load scan0 image and corners
         image0 = self.frames[frame_id]
-        if np.array_equal(image0, image1):
-            print("Images are identical. Test passed.")
-        else:
-            print("Images are different. Test failed.")
+        corners_0 = self.corners[frame_id]
 
-        if frame_id == 3:
-            l = 3
-        elif frame_id == 1:
-            l = 1
-        else:
-            l = 0
+        # Fire Max Size (length)
+        fire_size = self.config['fire']['max_size_m']  # [m]
+        # DB_Scan parameters
+        min_samples_factor = self.config['dbscan']['min_samples_factor']
+        eps_distance_factor = self.config['dbscan']['eps_distance_factor']
+        # Important Calculation
+        rgb_height, rgb_width = self.config['image']['rgb_size']  # [width, height]
+        ir_height, ir_width = self.config['image']['ir_size']
+        Slant_Range = h1 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
+        IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
+        GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
+
+        fire_length_pixel = np.floor(fire_size / GSD)
+        fire_num_pixel = fire_length_pixel ** 2
+
+        # FOV calc for Phase 2
+        ratio_image = self.config['fire']['ratio_in_rgb_image']  # fire ratio within the RGB image
+        IR2RGB_ratio = rgb_width / ir_width  # resolution ratio between RGB and IR images
+        min_fov = self.config['fov']['min_deg']  # degrees - minimal allowed FOV
+        max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
+
+        # Reproject and compute homography
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        transf = matrix.astype(float).flatten().tolist()
+
+        # # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
+        # geo_coords = [
+        #     [c[1], c[0]] if c is not None else None
+        #     for c in corners_0
+        # ]
+        #
+        # # Get projected pixel coordinates in image1
+        # pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, geo_coords)
+        #
+        # pixels_img0_at_img1 = np.array([
+        #     g if g is not None else [np.nan, np.nan]
+        #     for g in pixels_img0_at_img1_list
+        # ])  # TODO: Verify the returned format
+
+        img_size = self.config["image"]["ir_size"]
+        phi_deg = metadata["uav"]["pitch_deg"]
+        theta_deg = metadata["uav"]["yaw_deg"]
+        h = metadata["uav"]["altitude_agl_meters"]
+        hfov_deg = metadata["payload"]["field_of_view_deg"]
+        pixels_img0_at_img1, corners_1 = geo2pixel(corners_0=corners_0, theta1=theta_deg, phi1=phi_deg, h1=h, hfov1=hfov_deg, img_size=img_size)
+
+        pts_image = self.points0_arrange
+
+        H = create_homography(pts_image, pixels_img0_at_img1)
+
+        # Warp image0 to image1 frame
+        image0_proj = cv2.warpPerspective(image0, H, (image1.shape[1], image1.shape[0]),
+                                          cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=np.median(image0))
+
+        # Preprocess, compare, cluster, and score
+        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
+        diff_map = compute_positive_difference(image0_proj, image1)
+        diff_map = postprocess_difference_map(diff_map, image1, threshold=self.config['postprocessing']['threshold'],
+                                              temp_threshold=self.config['postprocessing']['temp_threshold'])
+
+        # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
+        min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
+        eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
+        # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
+        centers, label_map, bboxes = find_cluster_centers_conditional(
+            diff_map=diff_map,
+            threshold=self.config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
+            eps=eps_distance,  # Clustering radius
+            min_samples=min_samples,  # Minimum number of points in cluster
+            min_contrast=self.config['dbscan']['min_contrast']  # Contrast-based center selection
+        )
+        # Compute scores
+        scores = compute_cluster_scores(label_map, image1, GSD, norm_size=self.config['scoring']['norm_size'],
+                                        norm_intensity=self.config['scoring'][
+                                            'norm_intensity'])  # TODO (Maayan) switch to intensity parameter according to assaf instructions
+
+        # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
+        # FOV calculation
+        required_fov2 = []
+        for bbox in bboxes:
+            width = bbox[2] - bbox[0]
+            height = bbox[3] - bbox[1]
+            fire_size_IR = max(width, height)
+            fire_size_RGB = fire_size_IR * IR2RGB_ratio
+            fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
+            required_fov2.append(round(np.clip(fov, min_fov, max_fov), 2))
+
         # Return structured result
         results = []
-        for i in range(l):
+        for i in range(len(centers)):
             results.append({
-                'latitude': 0,
-                'longitude': 1,
-                'bounding_box': [2, 3, 4, 5],
-                'confidence_pct': 6, # TODO (Maayan) switch to intensity parameter according to assaf instructions
-                'required_fov2': 7,
-                'current_IR_fov': 8,
+                'Frame_index': frame_id,
+                'loc': centers[i],
+                'bbox': bboxes[i],
+                'confidence_pct': scores[i],
+                # TODO (Maayan) switch to intensity parameter according to assaf instructions
+                'required_fov2': required_fov2[i]
             })
 
         return results

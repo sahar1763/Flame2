@@ -28,7 +28,7 @@ class ScanManager:
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
         self.corners = {}   # frame_id: corners. Format: [top-left, top-right, bottom-right, bottom-left]
-        ir_width, ir_height = self.config['image']['ir_size']
+        ir_height, ir_width = self.config['image']['ir_size']
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
         # === Phase 2 - Loading Model ===
@@ -60,7 +60,7 @@ class ScanManager:
         """
         try:
             image_rgb_size = self.config['image']['rgb_size']
-            H, W = image_rgb_size[1], image_rgb_size[0]
+            H, W = image_rgb_size[0], image_rgb_size[1]
             dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
 
             # bbox at the center
@@ -119,7 +119,7 @@ class ScanManager:
         pts_image = self.points0_arrange
         pixels = [[int(x), int(y)] for (y, x) in pts_image]
 
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Compute corners and store them
@@ -151,8 +151,8 @@ class ScanManager:
         min_samples_factor = self.config['dbscan']['min_samples_factor']
         eps_distance_factor = self.config['dbscan']['eps_distance_factor']
         # Important Calculation
-        rgb_width, rgb_height = self.config['image']['rgb_size'] # [width, height]
-        ir_width, ir_height = self.config['image']['ir_size']
+        rgb_height, rgb_width = self.config['image']['rgb_size'] # [width, height]
+        ir_height, ir_width = self.config['image']['ir_size']
         Slant_Range = h1 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
@@ -167,7 +167,7 @@ class ScanManager:
         max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
 
         # Reproject and compute homography
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
@@ -223,7 +223,7 @@ class ScanManager:
             fire_size_IR = max(width, height)
             fire_size_RGB = fire_size_IR * IR2RGB_ratio
             fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
-            required_fov2.append(round(np.clip(fov, min_fov, max_fov, 2)))
+            required_fov2.append(round(np.clip(fov, min_fov, max_fov), 2))
 
         # Return structured result
         results = []
@@ -247,7 +247,7 @@ class ScanManager:
 
         # === 3. Define bbox
         # Reproject and compute homography
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Convert bbox [lat1, lon1, lat2, lon2] to [[lat1, lon1], [lat2, lon2]]
