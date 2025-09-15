@@ -68,3 +68,96 @@ def geo2pixel(corners_0, theta1, phi1, h1=2500, x1=0, y1=7500, hfov1=17.5, img_s
     return pixels_img0_at_img1, corners_1
 
 
+def plot_phase1(diff_map, corners_0, corners_1, centers, bboxes, Frame_index, x1=0, y1=7500):
+    ### ================= Plots ===============================
+    # Saving fig
+    # Create a figure with 3 subplots in a single row
+    fig, axs = plt.subplots(1, 4, figsize=(18, 6))
+    drone_pos = (x1, y1)
+    range_xy = 15000
+
+    # === Plot 1: Drone position and camera footprint ===
+    ax = axs[0]
+    ax.plot(*drone_pos, 'ro', label='Drone Position')
+
+    # Create closed polygon from corners
+    polygon1 = np.vstack([corners_0[0], corners_0[1], corners_0[3], corners_0[2], corners_0[0]])
+    ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
+    ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
+    polygon2 = np.vstack([corners_1[0], corners_1[1], corners_1[3], corners_1[2], corners_1[0]])
+    ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
+    ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
+
+    # Set axes limits and appearance
+    ax.set_xlim(-range_xy, range_xy)
+    ax.set_ylim(-range_xy, range_xy)
+    ax.set_aspect('equal')
+    ax.grid(True)
+    ax.legend()
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title("Drone Camera Ground Footprint")
+
+    # === Plot 2: Difference map with colorbar ===
+    im = axs[1].imshow(diff_map, cmap='gray', vmin=0, vmax=np.max(diff_map))
+    axs[1].set_title("Difference Map")
+    axs[1].set_xlabel("Pixel X")
+    axs[1].set_ylabel("Pixel Y")
+
+    # Add colorbar next to subplot 2
+    fig.colorbar(im, ax=axs[1], shrink=0.8)
+
+    # === Plot 3: Difference map with cluster centers ===
+    axs[2].imshow(diff_map, cmap='gray')
+    # Overlay red markers at detected cluster centers
+    for y, x in centers:
+        axs[2].plot(x, y, 'ro')
+    axs[2].set_title("Clusters on Diff Map")
+    # Overlay bounding boxes around detected clusters
+    for min_y, min_x, max_y, max_x in bboxes:
+        width = max_x - min_x
+        height = max_y - min_y
+        rect = patches.Rectangle(
+            (min_x, min_y),
+            width,
+            height,
+            linewidth=1.5,
+            edgecolor='lime',
+            facecolor='none'
+        )
+        axs[2].add_patch(rect)
+
+    # === Plot 4: Camera footprint ===
+    ax = axs[3]
+    ax.plot(*drone_pos, 'ro', label='Drone Position')
+
+    # Create closed polygon from corners
+    ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
+    ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
+    ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
+    ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
+
+    # Set axes limits and appearance
+    ax.set_aspect('equal')
+    ax.grid(True)
+    ax.legend()
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_title("Drone Camera Ground Footprint")
+
+    # Create results directory if it doesn't exist
+    os.makedirs("results", exist_ok=True)
+
+    # Full path to save the figure
+    filename = os.path.join("results_demoPackage", f"combined_plot_{Frame_index}.png")
+
+    # Adjust layout and save the figure
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+
+    # Close the figure to avoid displaying it
+    plt.close(fig)
+
+    ### ========================================================
+
+

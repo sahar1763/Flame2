@@ -2,7 +2,6 @@ from torchvision import transforms, models
 from PIL import Image
 import yaml
 import importlib.resources as pkg_resources
-import torch.backends.cudnn as cudnn
 
 import requests
 from typing import List, Tuple, Optional
@@ -50,9 +49,9 @@ class ScanManager:
         self.model = resnet
 
         # <<< Warm up >>>
-        print("Start warmup")
+        print("\033[1m\033[96m+++++ Start warmup +++++\033[0m")
         self._warmup_phase2()
-        print("End warmup")
+        print("\033[1m\033[96m+++++ End warmup +++++\033[0m")
 
     def _warmup_phase2(self) -> None:
         """
@@ -68,6 +67,7 @@ class ScanManager:
             cx, cy, r = W // 2, H // 2, 140
             dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
 
+            # TODO: Insert rational values
             self.dummy_md = {
                 "uav": {
                     "altitude_agl_meters": 2400.0,
@@ -98,17 +98,19 @@ class ScanManager:
                 "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
             }
 
+            self.dummy_md["investigation_parameters"]["detected_bounding_box"] = dummy_bbox
+
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
-            _ = self.phase2(dummy_img, dummy_bbox, self.dummy_md)
+            for i in range(self.config["warmup"]["num_iterations"]):
+                _ = self.phase2(dummy_img, self.dummy_md)
 
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
         except Exception as e:
             print(f"[phase2 warmup] skipped: {e}")
-
 
     def phase0(self, frame: np.ndarray, metadata: dict):
         """
@@ -257,10 +259,12 @@ class ScanManager:
                 'required_fov2': required_fov2[i]
             })
 
+        # Plots of phase1 for debugging
+        # plot_phase1(diff_map, corners_0, corners_1, centers, bboxes, frame_id) # TODO: Delete later
+
         return results
 
-
-    def phase2(self, image1: np.ndarray, bbox, metadata: dict):
+    def phase2(self, image1: np.ndarray, metadata: dict):
         """
         Process a new RGB frame.
         """
@@ -268,7 +272,9 @@ class ScanManager:
         tt0 = time.perf_counter()
 
         # === 3. Define bbox
-        bbox_pixels = (960-140, 540-140, 960+140, 540+140)  # example bounding box
+        # bbox_pixels = (960-140, 540-140, 960+140, 540+140)  # example bounding box
+        bbox = metadata["investigation_parameters"]["detected_bounding_box"]
+        bbox_pixels = bbox
 
         # === 4. Define crop factors and transformation
         crop_factors = self.config['phase2']['crop_factors']
@@ -296,7 +302,7 @@ class ScanManager:
         test_tensors = [t for t in test_tensors if t.numel() > 0]
 
         total_time = time.perf_counter() - tt0
-        print(f"\n=== Inference Timing for Cropping === {total_time * 1000:.2f} msec\n")
+        print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
         result = predict_crops_majority_vote(
             crops=test_tensors,

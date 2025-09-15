@@ -48,11 +48,11 @@ class ScanManager:
         self.model = resnet
 
         # <<< Warm up >>>
-        print("Start warmup")
+        print("\033[1m\033[96m+++++ Start warmup +++++\033[0m")
         self._warmup_phase2()
-        print("End warmup")
+        print("\033[1m\033[96m+++++ End warmup +++++\033[0m")
 
-
+    # TODO: Update base on demo
     def _warmup_phase2(self) -> None:
         """
         Run a full phase2 pass with dummy RGB image + bbox to warm pipelines:
@@ -67,7 +67,8 @@ class ScanManager:
             cx, cy, r = W // 2, H // 2, 140
             dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
 
-            dummy_md = {
+            # TODO: Insert rational values
+            self.dummy_md = {
                 "uav": {
                     "altitude_agl_meters": 2400.0,
                     "roll_deg": 0.5,
@@ -75,9 +76,9 @@ class ScanManager:
                     "yaw_deg": 45.0,
                 },
                 "payload": {
-                    "pitch_deg ": -12.0,
-                    "azimuth_deg ": 128.0,
-                    "field_of_view_deg ": 2.5,
+                    "pitch_deg": -12.0,
+                    "azimuth_deg": 128.0,
+                    "field_of_view_deg": 2.5,
                     "resolution_px": [1920, 1080],
                 },
                 "geolocation": {
@@ -87,24 +88,29 @@ class ScanManager:
                 },
                 "investigation_parameters": {
                     "detection_latitude": 31.0421,
-                    "detection_longitude ": 34.8516,
-                    "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
-
+                    "detection_longitude": 34.8516,
+                    "detected_bounding_box": [31.1, 34.8, 31.0, 34.9]
+                },
+                "scan_parameters": {
+                    "current_scanned_frame_id": 35,
+                    "total_scanned_frames": 173,
                 },
                 "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
             }
 
+            self.dummy_md["investigation_parameters"]["detected_bounding_box"] = dummy_bbox
+
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
-            _ = self.phase2(dummy_img, dummy_bbox, dummy_md)
+            for i in range(self.config["warmup"]["num_iterations"]):
+                _ = self.phase2(dummy_img, self.dummy_md)
 
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
         except Exception as e:
             print(f"[phase2 warmup] skipped: {e}")
-
 
     def phase0(self, frame: np.ndarray, metadata: dict):
         """
@@ -238,7 +244,7 @@ class ScanManager:
 
         return results
 
-    def phase2(self, image1: np.ndarray, bbox, metadata: dict):
+    def phase2(self, image1: np.ndarray, metadata: dict):
         """
         Process a new RGB frame.
         """
@@ -251,6 +257,7 @@ class ScanManager:
         transf = matrix.astype(float).flatten().tolist()
 
         # Convert bbox [lat1, lon1, lat2, lon2] to [[lat1, lon1], [lat2, lon2]]
+        bbox = metadata["investigation_parameters"]["detected_bounding_box"]
         bbox_geo = [
             [bbox[0], bbox[1]],  # top-left
             [bbox[2], bbox[3]]  # bottom-right
@@ -297,14 +304,7 @@ class ScanManager:
         test_tensors = [t for t in test_tensors if t.numel() > 0]
 
         total_time = time.perf_counter() - tt0
-        print(f"\n=== Inference Timing for Cropping === {total_time * 1000:.2f} msec\n")
-
-        # tt1 = time.time()
-        #
-        #
-        # total_time = time.time() - tt1
-
-        print(f"\n=== Inference Timing For Loading the Model === {total_time * 1000:.2f} msec\n")
+        print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
         result = predict_crops_majority_vote(
             crops=test_tensors,
@@ -321,8 +321,6 @@ class ScanManager:
         print("BBox:", result["bbox"])
 
         return result
-
-
 
 
 

@@ -80,3 +80,10 @@ detector:
   server_url: "http://127.0.0.1:8000"
   geo_server_address: "http://localhost:8080"
 
+
+# ---------------------------------------------------
+# Warmup
+# ---------------------------------------------------
+
+warmup:
+  num_iterations: 10

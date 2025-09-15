@@ -1,7 +1,3 @@
-import numpy as np
-import cv2
-from huggingface_hub import metadata_update
-
 from wildfire_detector.function_class_demo import ScanManager
 import time
 
@@ -15,418 +11,6 @@ import matplotlib.patches as patches
 import yaml
 import time
 import copy
-
-
-def main(image1, Frame_index, x1, y1, h1, theta1, phi1, hfov1):
-    """
-    Runs the full image simulation and analysis pipeline for a given viewing angle.
-
-    Parameters:
-    - theta (float): Azimuth angle of the drone/camera view, in degrees.
-    - phi (float): Tilt angle (elevation) of the camera, in degrees.
-    - original_grid (2D array): High-resolution input grid representing the environment.
-    - i (int): Identifier index used for saving plots or tracking runs.
-
-    Returns:
-    - result (dict): A dictionary containing statistics and metadata, such as:
-        - Actual_num: Number of clusters inserted into the image.
-        - Detected_num: Number of clusters detected by the algorithm.
-        - Ratio: Detected/actual ratio.
-        - clusters_center: Transformed cluster centers in grid coordinates.
-    """
-    times = {}
-    t0 = time.time()
-
-    global Scan0
-
-    # # Fire Max Size (length)
-    # fire_size = 10 # [m]
-
-    # DB_Scan parameters
-    min_samples_factor = config['dbscan']['min_samples_factor']
-    eps_distance_factor = config['dbscan']['eps_distance_factor']
-    # # Important Calculation
-    # Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-    # HFOV = hfov1  # Horizontal field of view (degrees)
-    # IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-    # GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
-    #
-    # fire_length_pixel = np.floor(fire_size / GSD)
-    # fire_num_pixel = fire_length_pixel**2
-
-    # FOV calc for Phase 2
-    # patch_length = 224  # total patch size in pixels
-    # ratio_patch = 0.7         # fire ratio within the patch
-    ratio_image = config['fire']['ratio_in_rgb_image']  # fire ratio within the RGB image
-    IR2RGB_ratio = rgb_width / ir_width  # resolution ratio between RGB and IR images
-    min_fov = config['fov']['min_deg']  # degrees - minimal allowed FOV
-    max_fov = config['fov']['max_deg']  # degrees - maximal allowed FOV
-
-    image_height = image1.shape[0]
-    image_width = image1.shape[1]
-
-    corners_0 = Scan0["corners0"][Frame_index]
-    image0 = Scan0["Scan0_Images"][Frame_index]
-
-    pixels_img0_at_img1, corners_1 = Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1)
-
-    # Step 1: Define the image corners in pixel coordinates for image1
-    # Format: [top-left, top-right, bottom-right, bottom-left]
-    pts_image = generate_uniform_grid(image_height, image_width, points_num=config['grid']['points_per_frame'])
-
-    # Homography
-    H_image1_to_image0 = create_homography(pts_image, pixels_img0_at_img1)
-
-    # Step 5: Warp image0 into the pixel frame of image1 using the computed homography
-    Image0_projected = cv2.warpPerspective(
-        image0,  # source image to warp
-        H_image1_to_image0,  # transformation from image1 pixels to image0 projection
-        (image1.shape[1], image1.shape[0]),  # output size (same as image1)
-        cv2.INTER_LINEAR,  # interpolation method
-        borderMode=cv2.BORDER_CONSTANT,  # fill borders with constant value
-        borderValue=np.median(image0)  # use median of image0 for padding
-    )
-
-    # === Preprocess and Compute Difference ===
-
-    # Step 1: Preprocess images (convert to uint8, optionally normalize)
-    image1, Image0_projected = preprocess_images(image1, Image0_projected, applying=config['preprocessing']['apply'])
-
-    # Step 2: Compute positive difference (changes in image1 that are brighter than image0 projection)
-    diff_map = compute_positive_difference(Image0_projected, image1)
-
-    # Step 3: Post-process the difference map to suppress noise and irrelevant areas
-    diff_map = postprocess_difference_map(diff_map, image1, threshold=config['postprocessing']['threshold'],
-                                          temp_threshold=config['postprocessing']['temp_threshold'])
-
-    # === Cluster Detection Based on Difference Map ===
-
-    # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
-    min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
-    min_samples = max(1, min_samples)
-    eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
-    eps_distance = max(2, eps_distance)
-
-    # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
-    print(f"min_samples: {min_samples}")
-    centers, label_map, bboxes = find_cluster_centers_conditional(
-        diff_map=diff_map,
-        threshold=config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
-        eps=eps_distance,  # Clustering radius
-        min_samples=min_samples,  # Minimum number of points in cluster
-        min_contrast=config['dbscan']['min_contrast']  # Contrast-based center selection
-    )
-
-    # Compute scores
-    scores = compute_cluster_scores(label_map, image1, GSD, norm_size=config['scoring']['norm_size'],
-                                    norm_intensity=config['scoring']['norm_intensity'])
-
-    # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
-    # Initialize lists to store computed FOVs per bounding box
-    required_fov2 = []  # FOVs based on entire image resolution requirement
-
-    # Loop through each detected bounding box
-    for bbox in bboxes:
-        x_min, y_min, x_max, y_max = bbox
-
-        # Compute width and height of the bounding box in IR pixel coordinates
-        width = x_max - x_min + 1  # +1 to include both endpoints (pixel indices are inclusive)
-        height = y_max - y_min + 1  # +1 to include both endpoints (pixel indices are inclusive)
-
-        # Take the longer dimension as the dominant fire size
-        pixels_IR_at_current = max(width, height)
-
-        # Convert fire size from IR pixels to RGB pixels
-        pixels_RGB_at_current = pixels_IR_at_current * IR2RGB_ratio
-
-        # --- FOV Type 2: Based on whole image resolution requirement ---
-        fov2 = HFOV / (ratio_image * rgb_height / pixels_RGB_at_current)
-        fov_clipped2 = round(np.clip(fov2, min_fov, max_fov), 2)
-
-        required_fov2.append(fov_clipped2)
-
-    total_time = time.time() - t0
-    print(f"\n=== Inference Timing Breakdown ===")
-    print(f"{'Total':>12}: {total_time * 1000:.2f} ms\n")
-
-    ### ================= Plots ===============================
-    # Saving fig
-    # Create a figure with 3 subplots in a single row
-    fig, axs = plt.subplots(1, 4, figsize=(18, 6))
-    drone_pos = (x1, y1)
-    range_xy = 15000
-
-    # === Plot 1: Drone position and camera footprint ===
-    ax = axs[0]
-    ax.plot(*drone_pos, 'ro', label='Drone Position')
-
-    # Create closed polygon from corners
-    polygon1 = np.vstack([corners_0[0], corners_0[1], corners_0[3], corners_0[2], corners_0[0]])
-    ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
-    ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
-    polygon2 = np.vstack([corners_1[0], corners_1[1], corners_1[3], corners_1[2], corners_1[0]])
-    ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
-    ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
-
-    # Set axes limits and appearance
-    ax.set_xlim(-range_xy, range_xy)
-    ax.set_ylim(-range_xy, range_xy)
-    ax.set_aspect('equal')
-    ax.grid(True)
-    ax.legend()
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("Drone Camera Ground Footprint")
-
-    # === Plot 2: Difference map with colorbar ===
-    im = axs[1].imshow(diff_map, cmap='gray', vmin=0, vmax=np.max(diff_map))
-    axs[1].set_title("Difference Map")
-    axs[1].set_xlabel("Pixel X")
-    axs[1].set_ylabel("Pixel Y")
-
-    # Add colorbar next to subplot 2
-    fig.colorbar(im, ax=axs[1], shrink=0.8)
-
-    # === Plot 3: Difference map with cluster centers ===
-    axs[2].imshow(diff_map, cmap='gray')
-    # Overlay red markers at detected cluster centers
-    for y, x in centers:
-        axs[2].plot(x, y, 'ro')
-    axs[2].set_title("Clusters on Diff Map")
-    # Overlay bounding boxes around detected clusters
-    for min_y, min_x, max_y, max_x in bboxes:
-        width = max_x - min_x
-        height = max_y - min_y
-        rect = patches.Rectangle(
-            (min_x, min_y),
-            width,
-            height,
-            linewidth=1.5,
-            edgecolor='lime',
-            facecolor='none'
-        )
-        axs[2].add_patch(rect)
-
-    # === Plot 4: Camera footprint ===
-    ax = axs[3]
-    ax.plot(*drone_pos, 'ro', label='Drone Position')
-
-    # Create closed polygon from corners
-    ax.plot(polygon1[:, 0], polygon1[:, 1], 'b-', label='Camera Footprint 0')
-    ax.fill(polygon1[:, 0], polygon1[:, 1], color='lightblue', alpha=0.4)
-    ax.plot(polygon2[:, 0], polygon2[:, 1], 'g-', label='Camera Footprint 1')
-    ax.fill(polygon2[:, 0], polygon2[:, 1], color='lightgreen', alpha=0.4)
-
-    # Set axes limits and appearance
-    ax.set_aspect('equal')
-    ax.grid(True)
-    ax.legend()
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_title("Drone Camera Ground Footprint")
-
-    # Create results directory if it doesn't exist
-    os.makedirs("results", exist_ok=True)
-
-    # Full path to save the figure
-    filename = os.path.join("results", f"combined_plot_{Frame_index}.png")
-
-    # Adjust layout and save the figure
-    plt.tight_layout()
-    plt.savefig(filename, dpi=300)
-
-    # Close the figure to avoid displaying it
-    plt.close(fig)
-
-    ### ========================================================
-
-    # ===================== Outputs ===========================
-    results = []
-    for i in range(len(centers)):
-        results.append({
-            'Frame_index': Frame_index,
-            'loc': centers[i],
-            'bbox': bboxes[i],
-            'confidence_pct': scores[i],
-            'required_fov2': required_fov2[i]
-        })
-
-    # ======================================================
-
-    return results
-
-
-def test(image1, image0, x1, y1, h1, theta1, phi1, hfov1):
-    """
-    Runs the full image simulation and analysis pipeline for a given viewing angle.
-
-    Parameters:
-    - theta (float): Azimuth angle of the drone/camera view, in degrees.
-    - phi (float): Tilt angle (elevation) of the camera, in degrees.
-    - original_grid (2D array): High-resolution input grid representing the environment.
-    - i (int): Identifier index used for saving plots or tracking runs.
-
-    Returns:
-    - result (dict): A dictionary containing statistics and metadata, such as:
-        - Actual_num: Number of clusters inserted into the image.
-        - Detected_num: Number of clusters detected by the algorithm.
-        - Ratio: Detected/actual ratio.
-        - clusters_center: Transformed cluster centers in grid coordinates.
-    """
-    global Scan0
-
-    # Fire Max Size (length)
-    fire_size = 10  # [m]
-
-    # DB_Scan parameters
-    min_samples_factor = 10
-    eps_distance_factor = 1.5
-    # Important Calculation
-    # Calculations
-    Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-    HFOV = hfov1  # Horizontal field of view (degrees)
-    IFOV = HFOV / 1920 / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-    GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
-
-    fire_length_pixel = np.floor(fire_size / GSD)
-    fire_num_pixel = fire_length_pixel ** 2
-
-    # FOV calc for Phase 2
-    patch_length = 224  # total patch size in pixels
-    ratio_patch = 0.7  # fire ratio within the patch
-    ratio_image = 0.25  # fire ratio within the RGB image
-    IR2RGB_ratio = 1920 / 1280  # resolution ratio between RGB and IR images
-    rgb_len = 1080
-    min_fov = 2.2  # degrees - minimal allowed FOV
-    max_fov = 60.0  # degrees - maximal allowed FOV
-
-    image_height = image1.shape[0]
-    image_width = image1.shape[1]
-
-    # === Preprocess and Compute Difference ===
-
-    # Step 1: Preprocess images (convert to uint8, optionally normalize)
-    image0, image1 = preprocess_images(image0, image1, applying=0)
-
-    # Step 2: Compute positive difference (changes in image1 that are brighter than image0 projection)
-    diff_map = compute_positive_difference(image0, image1)
-
-    # Step 3: Post-process the difference map to suppress noise and irrelevant areas
-    # threshold = 0 keeps only strictly positive differences
-    # temp_threshold = 0 filters out low-intensity regions in image1
-    diff_map = postprocess_difference_map(diff_map, image1, threshold=20, temp_threshold=None)
-
-    # === Cluster Detection Based on Difference Map ===
-
-    # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
-    min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
-    eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
-
-    # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
-    centers, label_map, bboxes = find_cluster_centers_conditional(
-        diff_map=diff_map,
-        threshold=10,  # Only consider pixels with diff > 10
-        eps=eps_distance,  # Clustering radius
-        min_samples=min_samples,  # Minimum number of points in cluster
-        min_contrast=10  # Contrast-based center selection
-    )
-
-    # Compute scores
-    scores = compute_cluster_scores(label_map, image1, GSD)
-
-    # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
-
-    # Estimate the desired fire size in RGB pixel scale (target size for zoom decision)
-    pixels_RGB_at_patch = patch_length * ratio_patch  # target fire size in RGB pixels
-
-    # Initialize lists to store computed FOVs per bounding box
-    required_fov2 = []  # FOVs based on entire image resolution requirement
-
-    # Loop through each detected bounding box
-    for bbox in bboxes:
-        x_min, y_min, x_max, y_max = bbox
-
-        # Compute width and height of the bounding box in IR pixel coordinates
-        width = x_max - x_min
-        height = y_max - y_min
-
-        # Take the longer dimension as the dominant fire size
-        pixels_IR_at_current = max(width, height)
-
-        # Convert fire size from IR pixels to RGB pixels
-        pixels_RGB_at_current = pixels_IR_at_current * IR2RGB_ratio
-
-        # --- FOV Type 2: Based on whole image resolution requirement ---
-        fov2 = HFOV / (ratio_image * rgb_len / pixels_RGB_at_current)
-        fov_clipped2 = round(np.clip(fov2, min_fov, max_fov), 2)
-
-        required_fov2.append(fov_clipped2)
-
-    # ==================== PLOTS ====================
-
-    # Create figure with 4 subplots in a single row
-    fig, axs = plt.subplots(1, 4, figsize=(20, 6))
-
-    # === Plot 0: Image 0 (Before) ===
-    axs[0].imshow(image0, cmap='gray')
-    axs[0].set_title("Image 0 (Before)")
-    axs[0].axis('off')
-
-    # === Plot 1: Image 1 (After) ===
-    axs[1].imshow(image1, cmap='gray')
-    axs[1].set_title("Image 1 (After)")
-    axs[1].axis('off')
-
-    # === Plot 2: Difference map with colorbar ===
-    im = axs[2].imshow(diff_map, cmap='gray', vmin=0, vmax=np.max(diff_map))
-    axs[2].set_title("Difference Map")
-    axs[2].set_xlabel("Pixel X")
-    axs[2].set_ylabel("Pixel Y")
-    fig.colorbar(im, ax=axs[2], shrink=0.8)
-
-    # === Plot 3: Clusters on difference map ===
-    axs[3].imshow(diff_map, cmap='gray')
-    axs[3].set_title("Clusters on Diff Map")
-    axs[3].set_xlabel("Pixel X")
-    axs[3].set_ylabel("Pixel Y")
-
-    # Overlay red markers at detected cluster centers
-    for y, x in centers:
-        axs[3].plot(x, y, 'ro')
-
-    # Overlay bounding boxes around detected clusters
-    for min_y, min_x, max_y, max_x in bboxes:
-        rect = patches.Rectangle(
-            (min_x, min_y),
-            max_x - min_x,
-            max_y - min_y,
-            linewidth=1.5,
-            edgecolor='lime',
-            facecolor='none'
-        )
-        axs[3].add_patch(rect)
-
-    # Adjust layout and display the figure
-    plt.tight_layout()
-    plt.show()
-
-    ### ========================================================
-
-    # ===================== Outputs ===========================
-    results = []
-    for i in range(len(centers)):
-        results.append({
-            'Frame_index': 1,
-            'loc': centers[i],
-            'bbox': bboxes[i],
-            'confidence_pct': scores[i],
-            'required_fov2': required_fov2[i]
-        })
-
-    # ======================================================
-
-    return results
-
 
 def Phi_Theta_Generation():
     """xxx"""
@@ -452,7 +36,6 @@ def Phi_Theta_Generation():
 
     return PHI, THETA
 
-
 def Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, config):
     metadata_array = []
     # 1. Generate uniform background values
@@ -475,7 +58,6 @@ def Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, config):
         i += 1
 
     return Scan0_Images, metadata_array
-
 
 def Creating_Scan1_Frame(fire_length_pixel, image_size):
     """xxx"""
@@ -560,97 +142,6 @@ def Creating_Phase1_input(PHI, THETA, h0, hfov0, metadata, config):
     return image_array, metadata_array, clusters_num_array, cluster_centers_array
 
 
-
-# # === Init ScanManager ===
-# sm = ScanManager()
-#
-# # === Create dummy IR image ===
-# ir_height, ir_width = sm.config['image']['ir_size']
-# frame_ir = np.random.randint(0, 255, (ir_height, ir_width), dtype=np.uint8)
-#
-# # ==== IMG 1 ====
-# image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00216-fire-rgb-flame3.JPG"
-# image_bgr = cv2.imread(image_path)
-# image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-#
-# # Step 1: Resize image to 600x600
-# resized = cv2.resize(image_rgb, (600, 600), interpolation=cv2.INTER_LINEAR)
-#
-# # Step 2: Create a black canvas (1080x1920)
-# frame_rgb1 = np.zeros((1080, 1920, 3), dtype=np.uint8)
-#
-# # Step 3: Compute top-left corner to paste the resized image in the center
-# y_offset = (1080 - 600) // 2
-# x_offset = (1920 - 600) // 2
-#
-# # Step 4: Paste resized image into the center of the canvas
-# frame_rgb1[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
-#
-# # ==== IMG 2 ====
-# image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00039-fire-rgb-flame3.JPG"
-# image_bgr = cv2.imread(image_path)
-# image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-#
-# # Step 1: Resize image to 600x600
-# resized = cv2.resize(image_rgb, (600, 600), interpolation=cv2.INTER_LINEAR)
-#
-# # Step 2: Create a black canvas (1080x1920)
-# frame_rgb2 = np.zeros((1080, 1920, 3), dtype=np.uint8)
-#
-# # Step 3: Compute top-left corner to paste the resized image in the center
-# y_offset = (1080 - 600) // 2
-# x_offset = (1920 - 600) // 2
-#
-# # Step 4: Paste resized image into the center of the canvas
-# frame_rgb2[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
-#
-# # === Create dummy metadata ===
-# metadata = {
-#     "uav": {
-#         "altitude_agl_meters": 2400.0,
-#         "roll_deg": 0.5,
-#         "pitch_deg": -1.2,
-#         "yaw_deg": 45.0,
-#     },
-#     "payload": {
-#         "pitch_deg ": -12.0,
-#         "azimuth_deg ": 128.0,
-#         "field_of_view_deg ": 2.5,
-#         "resolution_px": [1920, 1080],
-#     },
-#     "geolocation": {
-#         "latitude": 31.0461,
-#         "transformation_matrix": np.eye(4).tolist(),
-#         "longitude": 34.8516,
-#     },
-#     "investigation_parameters": {
-#         "detection_latitude": 31.0421,
-#         "detection_longitude ": 34.8516,
-#         "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
-#     },
-#     "scan_parameters": {
-#         "current_scanned_frame_id": 35,
-#         "total_scanned_frames": 173,
-#     },
-#     "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
-# }
-# # === Phase 0: Save reference frame and corner projection ===
-# sm.phase0(frame_ir, metadata)
-#
-# # === Phase 1: IR fire detection ===
-# results_phase1 = sm.phase1(frame_ir, metadata)
-# print("\nPhase 1 results:")
-# for res in results_phase1:
-#     print(res)
-#
-# # === Phase 2: RGB fire confirmation ===
-# # Use a dummy bbox (normally comes from phase1)
-# dummy_bbox = [32.1, 34.8, 32.0, 34.9]  # [top_lat, top_lon, bottom_lat, bottom_lon]
-# for i in range(3):
-#     print(f"\n{i}\n")
-#     result_phase2 = sm.phase2(frame_rgb1, dummy_bbox, metadata)
-
-
 if __name__ == "__main__":
 
     # === Init ScanManager ===
@@ -677,6 +168,8 @@ if __name__ == "__main__":
     # Defining PHI, THETA
     PHI, THETA = Phi_Theta_Generation()
 
+    # ==== Phase 0 ====
+
     # Creating scan_0_inputs
     scan_0_inputs_imgs, scan_0_inputs_metadata = Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, sm.config)
 
@@ -684,6 +177,8 @@ if __name__ == "__main__":
         frame_ir = scan_0_inputs_imgs[i]
         metadata = scan_0_inputs_metadata[i]
         sm.phase0(frame_ir, metadata)
+
+    # ==== Phase 1 ====
 
     # Creating phase1_inputs
     phase1_inputs_imgs, phase1_inputs_metadata, clusters_num_array, _ = Creating_Phase1_input(PHI, THETA, h0, hfov0, metadata, sm.config)
@@ -699,7 +194,10 @@ if __name__ == "__main__":
         metadata = phase1_inputs_metadata[i]
         clusters_num = clusters_num_array[i]
 
+        tt0 = time.perf_counter()
         result = sm.phase1(frame_ir, metadata)
+        total_time = time.perf_counter() - tt0
+        print(f"\n=== Phase1 Total Runtime === {total_time * 1000:.2f} msec\n")
 
         detected = len(result) if result is not None else 0
         ratio = detected / clusters_num if clusters_num > 0 else (1 if detected == 0 else 0)
@@ -722,6 +220,35 @@ if __name__ == "__main__":
     df.to_csv(csv_path, index=False)
     print(df.head())
 
+    # ==== Phase 2 ====
+
+    # Loading RGB image
+    rgb_size = sm.config["image"]["rgb_size"] # [height, width] = [1080, 1920]
+    image_path = r"C:/Projects/Flame2/Datasets_FromDvir/Datasets/rgb_images/00216-fire-rgb-flame3.JPG"
+    image_bgr = cv2.imread(image_path)
+    image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+    # Step 1: Resize image to 600x600
+    resized = cv2.resize(image_rgb, (600, 600), interpolation=cv2.INTER_LINEAR)
+
+    # Step 2: Create a black canvas (1080x1920)
+    frame_rgb1 = np.zeros((rgb_size[0], rgb_size[1], 3), dtype=np.uint8)
+
+    # Step 3: Compute top-left corner to paste the resized image in the center
+    y_offset = (rgb_size[0] - 600) // 2
+    x_offset = (rgb_size[1] - 600) // 2
+
+    # Step 4: Paste resized image into the center of the canvas
+    frame_rgb1[y_offset:y_offset + 600, x_offset:x_offset + 600] = resized
+
+    # Creating metadata for phase2:
+    metadata = copy.deepcopy(sm.dummy_md)
+    metadata["investigation_parameters"]["detected_bounding_box"] = [960-140, 540-140, 960+140, 540+140]
+
+    print("\033[1;96m=== Starting phase2 ===\033[0m")
+    for i in range(10):
+        print(f"\n{i}\n")
+        result_phase2 = sm.phase2(frame_rgb1, metadata)
 
     print("OK")
 
