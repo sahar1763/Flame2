@@ -28,7 +28,7 @@ class ScanManager:
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
         self.corners = {}   # frame_id: corners. Format: [top-left, top-right, bottom-right, bottom-left]
-        ir_width, ir_height = self.config['image']['ir_size']
+        ir_height, ir_width = self.config['image']['ir_size']
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
         # === Phase 2 - Loading Model ===
@@ -48,11 +48,11 @@ class ScanManager:
         self.model = resnet
 
         # <<< Warm up >>>
-        print("Start warmup")
+        print("\033[1m\033[96m+++++ Start warmup +++++\033[0m")
         self._warmup_phase2()
-        print("End warmup")
+        print("\033[1m\033[96m+++++ End warmup +++++\033[0m")
 
-
+    # TODO: Update base on demo
     def _warmup_phase2(self) -> None:
         """
         Run a full phase2 pass with dummy RGB image + bbox to warm pipelines:
@@ -60,14 +60,15 @@ class ScanManager:
         """
         try:
             image_rgb_size = self.config['image']['rgb_size']
-            H, W = image_rgb_size[1], image_rgb_size[0]
+            H, W = image_rgb_size[0], image_rgb_size[1]
             dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
 
             # bbox at the center
             cx, cy, r = W // 2, H // 2, 140
             dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
 
-            dummy_md = {
+            # TODO: Insert rational values
+            self.dummy_md = {
                 "uav": {
                     "altitude_agl_meters": 2400.0,
                     "roll_deg": 0.5,
@@ -75,9 +76,9 @@ class ScanManager:
                     "yaw_deg": 45.0,
                 },
                 "payload": {
-                    "pitch_deg ": -12.0,
-                    "azimuth_deg ": 128.0,
-                    "field_of_view_deg ": 2.5,
+                    "pitch_deg": -12.0,
+                    "azimuth_deg": 128.0,
+                    "field_of_view_deg": 2.5,
                     "resolution_px": [1920, 1080],
                 },
                 "geolocation": {
@@ -87,24 +88,29 @@ class ScanManager:
                 },
                 "investigation_parameters": {
                     "detection_latitude": 31.0421,
-                    "detection_longitude ": 34.8516,
-                    "detected_bounding_box ": [31.1, 34.8, 31.0, 34.9]
-
+                    "detection_longitude": 34.8516,
+                    "detected_bounding_box": [31.1, 34.8, 31.0, 34.9]
+                },
+                "scan_parameters": {
+                    "current_scanned_frame_id": 35,
+                    "total_scanned_frames": 173,
                 },
                 "timestamp": "2025-04-08T12:30:45.123Z",  # ISO 8601 format
             }
 
+            self.dummy_md["investigation_parameters"]["detected_bounding_box"] = dummy_bbox
+
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
-            _ = self.phase2(dummy_img, dummy_bbox, dummy_md)
+            for i in range(self.config["warmup"]["num_iterations"]):
+                _ = self.phase2(dummy_img, self.dummy_md)
 
             if self.device.type == 'cuda':
                 torch.cuda.synchronize()
 
         except Exception as e:
             print(f"[phase2 warmup] skipped: {e}")
-
 
     def phase0(self, frame: np.ndarray, metadata: dict):
         """
@@ -119,7 +125,7 @@ class ScanManager:
         pts_image = self.points0_arrange
         pixels = [[int(x), int(y)] for (y, x) in pts_image]
 
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Compute corners and store them
@@ -151,8 +157,8 @@ class ScanManager:
         min_samples_factor = self.config['dbscan']['min_samples_factor']
         eps_distance_factor = self.config['dbscan']['eps_distance_factor']
         # Important Calculation
-        rgb_width, rgb_height = self.config['image']['rgb_size'] # [width, height]
-        ir_width, ir_height = self.config['image']['ir_size']
+        rgb_height, rgb_width = self.config['image']['rgb_size'] # [width, height]
+        ir_height, ir_width = self.config['image']['ir_size']
         Slant_Range = h1 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
@@ -167,7 +173,7 @@ class ScanManager:
         max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
 
         # Reproject and compute homography
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
@@ -223,7 +229,7 @@ class ScanManager:
             fire_size_IR = max(width, height)
             fire_size_RGB = fire_size_IR * IR2RGB_ratio
             fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
-            required_fov2.append(round(np.clip(fov, min_fov, max_fov, 2)))
+            required_fov2.append(round(np.clip(fov, min_fov, max_fov), 2))
 
         # Return structured result
         results = []
@@ -238,7 +244,7 @@ class ScanManager:
 
         return results
 
-    def phase2(self, image1: np.ndarray, bbox, metadata: dict):
+    def phase2(self, image1: np.ndarray, metadata: dict):
         """
         Process a new RGB frame.
         """
@@ -247,10 +253,11 @@ class ScanManager:
 
         # === 3. Define bbox
         # Reproject and compute homography
-        matrix = np.array(metadata["transformation_matrix"])  # should be shape (4, 4)
+        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Convert bbox [lat1, lon1, lat2, lon2] to [[lat1, lon1], [lat2, lon2]]
+        bbox = metadata["investigation_parameters"]["detected_bounding_box"]
         bbox_geo = [
             [bbox[0], bbox[1]],  # top-left
             [bbox[2], bbox[3]]  # bottom-right
@@ -297,14 +304,7 @@ class ScanManager:
         test_tensors = [t for t in test_tensors if t.numel() > 0]
 
         total_time = time.perf_counter() - tt0
-        print(f"\n=== Inference Timing for Cropping === {total_time * 1000:.2f} msec\n")
-
-        # tt1 = time.time()
-        #
-        #
-        # total_time = time.time() - tt1
-
-        print(f"\n=== Inference Timing For Loading the Model === {total_time * 1000:.2f} msec\n")
+        print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
         result = predict_crops_majority_vote(
             crops=test_tensors,
@@ -321,8 +321,6 @@ class ScanManager:
         print("BBox:", result["bbox"])
 
         return result
-
-
 
 
 

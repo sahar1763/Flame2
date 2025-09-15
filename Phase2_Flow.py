@@ -2,7 +2,7 @@ import cv2
 from torchvision import transforms, models
 from PIL import Image
 
-from utils_phase2_flow import *
+from wildfire_detector.utils_phase2_flow import *
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

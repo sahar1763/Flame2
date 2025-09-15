@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
-from utils_Frame import *
+from wildfire_detector.utils_Frame import *
 import cv2
 import random
 import matplotlib.patches as patches
@@ -470,7 +470,7 @@ def Creating_Scan0(PHI, THETA, x0, y0, h0, hfov0, image0=None):
     i = 0
     # Loop over all (PHI, THETA) combinations and draw projected camera footprints
     for Phi, Theta in zip(PHI, THETA):
-        corners0.append(get_ground_corners(x0, y0, h0, Theta, Phi, hfov0))
+        corners0.append(pixel2geo(theta_deg=Theta, phi_deg=Phi, h=h0, x=x0, y=y0, hfov_deg=hfov0))
         Frame_Index[i] = i
         i += 1
 
@@ -505,7 +505,7 @@ def Creating_Scan1_Frame(fire_length_pixel):
     return image1, clusters_num, cluster_centers
 
 
-def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1):
+def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1=0, y1=7500, h1=2500, hfov1=17.5):
     """xxx"""
 
     image_height = 720
@@ -513,7 +513,7 @@ def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1):
     
     
     # Compute ground-intersection corners for the second camera position
-    corners_1 = get_ground_corners(x1, y1, h1, theta1, phi1, hfov1)
+    corners_1 = pixel2geo(theta_deg=theta1, phi_deg=phi1, h=h1, x=x1, y=y1, hfov_deg=hfov1)
 
     # Step 1: Define the image corners in pixel coordinates for image1
     # Format: [top-left, top-right, bottom-right, bottom-left]
@@ -539,7 +539,7 @@ def Reuven_Function(corners_0, Frame_index, theta1, phi1, x1, y1, h1, hfov1):
 # Entry point for script execution - Original Scenario
 if __name__ == "__main__":
 
-    with open("config.yaml", 'r') as file:
+    with open("wildfire_detector'/config.yaml", 'r') as file:
         config = yaml.safe_load(file)
 
     # Parameters
@@ -579,8 +579,8 @@ if __name__ == "__main__":
         hfov1 = hfov0 + random.gauss(0, hfov_std)
 
         # Important Calculation
-        rgb_width, rgb_height = config['image']['rgb_size']  # [width, height]
-        ir_width, ir_height = config['image']['ir_size']
+        rgb_height, rgb_width = config['image']['rgb_size']  # [width, height]
+        ir_height, ir_width = config['image']['ir_size']
         Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         HFOV = hfov1  # Horizontal field of view (degrees)
         IFOV = HFOV / rgb_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]

@@ -185,7 +185,11 @@ def add_uniform_spots(image,
     return num_spots
 
 
-def get_ground_corners(x, y, h, theta_deg, phi_deg, hfov_deg, width=1280, height=720):
+def pixel2geo(theta_deg, phi_deg, h=2500, x=0, y=7500, hfov_deg=17.5, img_size=[720,1280]):
+
+    height = img_size[0]
+    width = img_size[1]
+
     vfov_deg = compute_vfov_from_hfov(hfov_deg, width, height)
 
     theta = np.radians(theta_deg)
