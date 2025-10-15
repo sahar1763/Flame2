@@ -1,6 +1,7 @@
 # Standard library
 import os
 import sys
+import yaml
 
 # Third-party libraries
 import torch
@@ -24,8 +25,13 @@ def main():
     images_dir = 'Datasets_FromDvir/Datasets/rgb_images'
     labels_excel_path = 'Datasets_FromDvir/Datasets/labels.csv'
 
+
+    path = r"C:\Projects\Flame2\wildfire_detector\config.yaml"
+    with open(path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
     train_loader, val_loader, test_loader, num_classes = prepare_dataloaders(
-        image_size=254,
+        image_size=config["phase2"]["net_image_size"], # TODO: Check and validate image size
         images_dir='Datasets_FromDvir/Datasets/rgb_images',
         labels_csv_path='Datasets_FromDvir/Datasets/labels.csv',
         batch_size=100

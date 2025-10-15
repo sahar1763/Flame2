@@ -1,18 +1,18 @@
 # For running the demo package:
 # Instead of:
-# from wildfire_detector.function_class import ScanManager
+# from wildfire_detector.function_class_TensorRT import ScanManager
 # Insert:
-# from wildfire_detector.function_class_demo import ScanManager
+# from wildfire_detector.function_class_demo_TensorRT import ScanManager
 # And instead of (in "metadata"):
 # "detected_bounding_box": [31.1, 34.8, 31.0, 34.9]
 # Insert (in "metadata"):
 # "detected_bounding_box": [960-140, 540-140, 960+140, 540+140]
 
 # Installing the package:
-# pip install dist/wildfire_detector-0.1.2-py3-none-any.whl
+# pip install dist/wildfire_detector-0.1.3-py3-none-any.whl
 
 import numpy as np
-from wildfire_detector.function_class import ScanManager
+from wildfire_detector.function_class_TensorRT import ScanManager
 
 # === Init ScanManager ===
 sm = ScanManager()

@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
 
     name='wildfire_detector',
-    version='0.1.2',
+    version='0.1.3',
     packages=find_packages(),
 
     install_requires=[
@@ -21,6 +21,6 @@ setup(
     include_package_data=True,
 
     package_data={
-        'wildfire_detector': ['*.yaml', '*.pt']
+        'wildfire_detector': ['*.yaml', '*.pt', '*.onnx']
     },
 )

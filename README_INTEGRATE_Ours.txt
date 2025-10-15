@@ -9,13 +9,30 @@
 
 # Install/Uninstall the package - Linux:
 # At the Terminal:
-# cd /path/to/Flame2
-# source .venv/bin/
+# cd /path/to/Flame2 (/home/malat/PycharmProject/Flame2)
+# source .venv/bin/activate
 # pip uninstall wildfire_detector
 # pip install dist/wildfire_detector-0.1.1-py3-none-any.whl
 # To run a .py file in the Terminal
 # python Try.py
 
+# Creating onnx file from the .pt file
+# run TensorRT_Conversion.py file
+
+# RT: - at the Jetson, after we got onnx file. - Just a backup - already runs inside function_classRT code
+/usr/src/tensorrt/bin/trtexec \
+  --onnx=wildfire_detector/resnet_fire_classifier.onnx \
+  --saveEngine=wildfire_detector/resnet_fire_classifier_fp16.trt \
+  --fp16 \
+  --minShapes=input:1x3x254x254 \ #?
+  --optShapes=input:3x3x254x254 \ #?
+  --maxShapes=input:16x3x254x254 \ #?
+  --shapes=input:1x3x254x254 #?
+
+# In order to use RT class replace :
+# from wildfire_detector.function_class_demo import ScanManager
+# with:
+# from wildfire_detector.function_class_demo_TensorRT import ScanManager
 
 import numpy as np
 from wildfire_detector.function_class_demo import ScanManager
