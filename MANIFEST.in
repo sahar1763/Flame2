@@ -1,2 +1,3 @@
 recursive-include wildfire_detector *.yaml
 recursive-include wildfire_detector *.pt
+recursive-include wildfire_detector *.onnx

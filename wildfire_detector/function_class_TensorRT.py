@@ -1,6 +1,7 @@
 from torchvision import transforms, models
 from PIL import Image
 import yaml
+import os
 import importlib.resources as pkg_resources
 
 import requests
@@ -9,6 +10,9 @@ from typing import List, Tuple, Optional
 from wildfire_detector.utils_Frame import *
 from wildfire_detector.utils_phase2_flow import *
 from wildfire_detector.TensorRT_infer import TRTInference
+
+import subprocess
+import shutil
 
 class ScanManager:
     def __init__(self, config_path=None):
@@ -33,11 +37,7 @@ class ScanManager:
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
         # --- Phase 2: Load TensorRT Engine ---
-        engine_name = self.config.get('phase2', {}).get('trt_engine', 'resnet_fire_classifier_fp16.trt')
-
-        # Resolve path inside the package
-        engine_traversable = pkg_resources.files(__package__).joinpath(engine_name)
-        engine_path = str(engine_traversable)
+        engine_path = self.load_or_build_trt_engine()
 
         print(f"[INFO] Loading TensorRT engine: {engine_path}")
         self.model = TRTInference(engine_path)  # <-- TensorRT wrapper
@@ -313,6 +313,44 @@ class ScanManager:
 
         return result
 
+    def load_or_build_trt_engine(self) -> str:
+        """
+        Loads the existing TensorRT engine file, or builds it from the ONNX file located
+        inside the wildfire_detector package using trtexec.
+
+        Returns:
+            str: Path to the .trt engine file inside the package
+        """
+        package_root = pkg_resources.files("wildfire_detector")
+        onnx_path = str(package_root / "resnet_fire_classifier.onnx")
+        engine_path = str(package_root / "resnet_fire_classifier_fp16.trt")
+
+        if os.path.exists(engine_path):
+            print(f"[TRT] Found existing engine at: {engine_path}")
+            return engine_path
+
+        print("[TRT] Building TensorRT engine...")
+
+        build_cmd = [
+            "/usr/src/tensorrt/bin/trtexec",
+            f"--onnx={onnx_path}",
+            f"--saveEngine={engine_path}",
+            "--fp16",
+            "--minShapes=input:1x3x254x254",
+            "--optShapes=input:3x3x254x254",
+            "--maxShapes=input:16x3x254x254",
+            "--shapes=input:1x3x254x254"
+        ]
+
+        start = time.perf_counter()
+        result = subprocess.run(build_cmd, capture_output=True, text=True)
+        duration = time.perf_counter() - start
+
+        if result.returncode != 0:
+            raise RuntimeError(f"[TRT] Engine build failed:\n{result.stderr}")
+
+        print(f"[TRT] Engine built in {duration:.1f}s and saved to: {engine_path}")
+        return engine_path
 
 
 class DetectorClient:
