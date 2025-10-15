@@ -195,7 +195,7 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     # Stage 3: Inference with TensorRT
     t3 = time.perf_counter()
     outputs = model.infer(np_batch)  # returns raw logits (N,num_classes)
-    outputs = outputs.reshape(-1, 2) # TODO: Changed
+    outputs = outputs.reshape(-1, 2)  # e.g., num_classes = 2
     probs = np.exp(outputs) / np.sum(np.exp(outputs), axis=1, keepdims=True)  # softmax
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)

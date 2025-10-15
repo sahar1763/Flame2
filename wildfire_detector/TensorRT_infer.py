@@ -28,9 +28,11 @@ class TRTInference:
             else:
                 self.output_name = name
 
-        # Placeholders for device buffers (will be created in infer)
+        # Placeholders for device buffers and their sizes
         self.dev_input = None
+        self.dev_input_size = 0
         self.dev_output = None
+        self.dev_output_size = 0
 
     def infer(self, np_input: np.ndarray) -> np.ndarray:
         """
@@ -47,12 +49,14 @@ class TRTInference:
 
         # 3. (Re)allocate device buffers if needed
         input_size = np_input.nbytes
-        if not hasattr(self, "dev_input") or self.dev_input.size < input_size:
+        if self.dev_input is None or self.dev_input_size < input_size:
             self.dev_input = cuda.mem_alloc(input_size)
+            self.dev_input_size = input_size  # update the size tracker
         output_shape = self.context.get_tensor_shape(self.output_name)
         output_size = int(np.prod(output_shape)) * np.float32().nbytes
-        if not hasattr(self, "dev_output") or self.dev_output.size < output_size:
+        if self.dev_output is None or self.dev_output_size < output_size:
             self.dev_output = cuda.mem_alloc(output_size)
+            self.dev_output_size = output_size  # update the size tracker
 
         # 4. Copy input host→device
         cuda.memcpy_htod_async(self.dev_input, np_input, self.stream)
@@ -71,4 +75,3 @@ class TRTInference:
 
         # 8. Reshape output to (N, num_classes)
         return host_output.reshape(batch_size, -1)
-

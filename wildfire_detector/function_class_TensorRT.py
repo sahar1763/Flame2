@@ -8,6 +8,7 @@ from typing import List, Tuple, Optional
 
 from wildfire_detector.utils_Frame import *
 from wildfire_detector.utils_phase2_flow import *
+from wildfire_detector.TensorRT_infer import TRTInference
 
 class ScanManager:
     def __init__(self, config_path=None):
@@ -31,28 +32,22 @@ class ScanManager:
         ir_height, ir_width = self.config['image']['ir_size']
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
-        # === Phase 2 - Loading Model ===
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        # Load model from package
-        with pkg_resources.files(__package__).joinpath("resnet_fire_classifier.pt").open("rb") as f:
-            checkpoint = torch.load(f, map_location=torch.device('cpu'), weights_only=True)
+        # --- Phase 2: Load TensorRT Engine ---
+        engine_name = self.config.get('phase2', {}).get('trt_engine', 'resnet_fire_classifier_fp16.trt')
 
-        # Define model and load state
-        num_classes = 2
-        resnet = models.resnet18(weights=None) #(pretrained=False)
-        num_ftrs = resnet.fc.in_features
-        resnet.fc = torch.nn.Linear(num_ftrs, num_classes)
-        resnet.load_state_dict(checkpoint["model_state"])
-        resnet = resnet.to(self.device)
-        resnet.eval()
-        self.model = resnet
+        # Resolve path inside the package
+        engine_traversable = pkg_resources.files(__package__).joinpath(engine_name)
+        engine_path = str(engine_traversable)
+
+        print(f"[INFO] Loading TensorRT engine: {engine_path}")
+        self.model = TRTInference(engine_path)  # <-- TensorRT wrapper
+        self.is_trt = True
 
         # <<< Warm up >>>
         print("\033[1m\033[96m+++++ Start warmup +++++\033[0m")
         self._warmup_phase2()
         print("\033[1m\033[96m+++++ End warmup +++++\033[0m")
 
-    # TODO: Update base on demo
     def _warmup_phase2(self) -> None:
         """
         Run a full phase2 pass with dummy RGB image + bbox to warm pipelines:
@@ -105,9 +100,6 @@ class ScanManager:
 
             for i in range(self.config["warmup"]["num_iterations"]):
                 _ = self.phase2(dummy_img, self.dummy_md)
-
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
 
         except Exception as e:
             print(f"[phase2 warmup] skipped: {e}")
@@ -306,11 +298,10 @@ class ScanManager:
         total_time = time.perf_counter() - tt0
         print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
-        result = predict_crops_majority_vote(
+        result = predict_crops_majority_vote_RT(
             crops=test_tensors,
             model=self.model,
             bbox=bbox_pixels,
-            device=self.device,
             original_image=image1,
             crops_np=cropped_images_np,
             plot=False
