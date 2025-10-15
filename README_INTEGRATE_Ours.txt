@@ -10,11 +10,24 @@
 # Install/Uninstall the package - Linux:
 # At the Terminal:
 # cd /path/to/Flame2
-# source .venv/bin/
+# source .venv/bin/activate
 # pip uninstall wildfire_detector
 # pip install dist/wildfire_detector-0.1.1-py3-none-any.whl
 # To run a .py file in the Terminal
 # python Try.py
+
+# יצירת קובץ onnx לפי הקוד המרה שעשינו
+
+# RT: - at the Jetson, after we got onnx file. זה מהצאט, צריך לעשות התאמה של הניתובים (לקובץ שהוא טוען ולאן שהוא שומר)
+/usr/src/tensorrt/bin/trtexec \
+  --onnx=AAA/resnet_fire_classifier.onnx \
+  --saveEngine=AAA/resnet_fire_classifier_fp16.trt \
+  --fp16 \
+  --minShapes=input:1x3x254x254 \
+  --optShapes=input:8x3x254x254 \
+  --maxShapes=input:16x3x254x254 \
+  --shapes=input:1x3x254x254
+
 
 
 import numpy as np

@@ -169,3 +169,70 @@ def predict_crops_majority_vote(crops, model, bbox, device,
         "bbox": bbox
     } # TODO: Update the return based on ICD
 
+
+def predict_crops_majority_vote_RT(crops, model, bbox,
+                                original_image=None,
+                                crops_np=None,
+                                plot=False):
+    """
+    TensorRT-only version (batched), similar to original PyTorch one.
+    'model' here is a TRTInference instance.
+    """
+    label_names = {0: "No Fire", 1: "Fire"}
+    times = {}
+    t0 = time.perf_counter()
+
+    # Stage 1: Stack crops (Torch -> one batch tensor)
+    t1 = time.perf_counter()
+    batch = torch.stack(crops)  # (N,C,H,W)
+    times['stack'] = time.perf_counter() - t1
+
+    # Stage 2: Convert to NumPy (TensorRT expects np.float32)
+    t2 = time.perf_counter()
+    np_batch = batch.cpu().numpy().astype(np.float32)  # (N,C,H,W)
+    times['to_numpy'] = time.perf_counter() - t2
+
+    # Stage 3: Inference with TensorRT
+    t3 = time.perf_counter()
+    outputs = model.infer(np_batch)  # returns raw logits (N,num_classes)
+    outputs = outputs.reshape(-1, 2) # TODO: Changed
+    probs = np.exp(outputs) / np.sum(np.exp(outputs), axis=1, keepdims=True)  # softmax
+    preds = np.argmax(probs, axis=1)
+    confs = np.max(probs, axis=1)
+    times['inference'] = time.perf_counter() - t3
+
+    # Stage 4: Post-processing
+    t4 = time.perf_counter()
+    pred_labels = [label_names[p] for p in preds]
+    fire_votes = (preds == 1).sum()
+    vote_ratio = fire_votes / len(crops)
+    final_class = 1 if vote_ratio > 0.6 else 0
+    final_label = label_names[final_class]
+    avg_conf = float(np.mean(probs[:, final_class]))
+    times['postprocess'] = time.perf_counter() - t4
+
+    total_time = time.perf_counter() - t0
+
+    # === Print timing breakdown ===
+    print(f"\n=== Inference Timing (TensorRT) ===")
+    for k, v in times.items():
+        print(f"{k:>12}: {v * 1000:.2f} ms")
+    print(f"{'Total':>12}: {total_time * 1000:.2f} ms\n")
+
+    # Optional plot
+    if plot and original_image is not None and crops_np is not None:
+        plot_crops_with_predictions(
+            original_image,
+            crops_np,
+            pred_labels,
+            confs.tolist(),
+            final_label,
+            avg_conf,
+            bbox=bbox
+        )
+
+    return {
+        "final_prediction": final_label,
+        "confidence": avg_conf,
+        "bbox": bbox
+    }
