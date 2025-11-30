@@ -6,16 +6,25 @@ from torch.optim import Optimizer
 from collections import namedtuple
 from tqdm import tqdm, trange
 
+import wandb
+
 # Creating a class to store the results
 TrainingResults = namedtuple('TrainingResults', ['train_loss', 'val_loss', 'test_loss', 'train_acc', 'val_acc', 'test_acc'])
 
 
 class Trainer:
-    def __init__(self, model, loss_fn, optimizer, device="cpu"):
+    def __init__(self, model, loss_fn, optimizer, use_wandb = False, wandb_run = None, device="cpu"):
         self.model = model.to(device)
         self.loss_fn = loss_fn
         self.optimizer = optimizer
         self.device = device
+
+        # W&B integration
+        self.use_wandb = use_wandb
+        self.wandb_run = wandb_run
+
+        if self.use_wandb and self.wandb_run is not None:
+            self.wandb_run.watch(self.model, log="all", log_freq=100)
 
     def train_batch(self, batch):
         raise NotImplementedError()
@@ -70,6 +79,25 @@ class Trainer:
                 print(f"  Train Loss: {train_result['loss'][0]:.4f} | Train Acc: {train_result['accuracy']:.2f}%")
                 print(f"  Val Loss: {val_result['loss'][0]:.4f} | Val Acc: {val_result['accuracy']:.2f}%")
                 print(f"  Test Loss: {test_result['loss'][0]:.4f} | Test Acc: {test_result['accuracy']:.2f}%")
+
+            # ---------- W&B LOGGING (NEW) ----------
+            if self.use_wandb and self.wandb_run is not None:
+                # Grab current LR (assumes single param group)
+                current_lr = self.optimizer.param_groups[0]["lr"]
+
+                self.wandb_run.log(
+                    {
+                        "epoch": epoch + 1,
+                        "train/loss": train_result["loss"][0],
+                        "train/acc": train_result["accuracy"],
+                        "val/loss": val_result["loss"][0],
+                        "val/acc": val_result["accuracy"],
+                        "test/loss": test_result["loss"][0],
+                        "test/acc": test_result["accuracy"],
+                        "lr": current_lr,
+                    },
+                    step=epoch + 1,
+                )
 
             # Early Stopping Check
             if best_acc is None or val_result["accuracy"] > best_acc:
