@@ -78,9 +78,9 @@ phase2:
 # ---------------------------------------------------  
   
 detector:
-  server_url: "http://127.0.0.1:8000"
-  geo_server_address: "http://localhost:8080"
-
+  geo_server_base: "http://127.0.0.1:9000"
+  endpoint_pixel2geo: "/api/pixel_to_geo"
+  endpoint_geo2pixel: "/api/geo_to_pixel"
 
 # ---------------------------------------------------
 # Warmup

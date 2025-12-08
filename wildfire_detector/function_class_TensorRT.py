@@ -4,8 +4,8 @@ import yaml
 import os
 import importlib.resources as pkg_resources
 
-import requests
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Iterable, Dict, Any
+import httpx
 
 from wildfire_detector.utils_Frame import *
 from wildfire_detector.utils_phase2_flow import *
@@ -25,10 +25,7 @@ class ScanManager:
                 self.config = yaml.safe_load(f)
 
         # Initialize DetectorClient
-        self.detector_client = DetectorClient(
-            server_url=self.config["detector"]["server_url"],  # add to config.yaml
-            geo_server_address=self.config["detector"]["geo_server_address"]
-        )
+        self.detector_client = DetectorClient()
 
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
@@ -117,11 +114,33 @@ class ScanManager:
         pts_image = self.points0_arrange
         pixels = [[int(x), int(y)] for (y, x) in pts_image]
 
+        # normalized pixel to [0 1] range
+        ir_height, ir_width = self.config['image']['ir_size']
+        normalized_pixels = [
+            [x / (ir_width - 1), y / (ir_height - 1)]
+            for (y, x) in pts_image
+        ]
+
         matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
         transf = matrix.astype(float).flatten().tolist()
 
         # Compute corners and store them
-        geo_results = self.detector_client.pixels_to_geo(transf, pixels)
+        geo_results = []
+
+        for x_01, y_01 in normalized_pixels:  # TODO: verify the api for pixels in batch
+            result = self.detector_client.georeg_pixel_to_latlon(
+                geo_server_base=self.config['detector']['geo_server_base'],
+                endpoint=self.config['detector']['endpoint_pixel2geo'],
+                transf16=transf,
+                x_01=x_01,
+                y_01=y_01,
+                server_id=1
+            )
+            try:
+                coords = result["data"]["res"]["coords"]["ptc"]
+                geo_results.append([coords["y"], coords["x"]])  # [lat, lon]
+            except Exception:
+                geo_results.append(None)
 
         ground_corners = np.array([
             g if g is not None else [np.nan, np.nan]
@@ -174,13 +193,42 @@ class ScanManager:
             for c in corners_0
         ]
 
-        # Get projected pixel coordinates in image1
-        pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, geo_coords)
+        # Get image resolution for normalization
+        ir_height, ir_width = self.config['image']['ir_size']
 
+        # Initialize results list
+        pixels_img0_at_img1_list = []
+
+        # Loop through each coordinate and convert
+        for coord in geo_coords:  # TODO: verify the api for pixels in batch
+            if coord is None:
+                pixels_img0_at_img1_list.append(None)
+                continue
+
+            lat, lon = coord  # already [lat, lon] # TODO: missing alt?
+
+            try:
+                result = self.detector_client.georeg_latlon_to_pixel(
+                    geo_server_base=self.config['detector']['geo_server_base'],
+                    endpoint=self.config['detector']['endpoint_geo2pixel'],
+                    transf16=transf,
+                    lat=lat,
+                    lon=lon,  # TODO: missing alt?
+                    server_id=1
+                )
+                # Get pixel coordinates and de-normalize
+                px = result["data"]["res"]["coords"]["ptc"]["x"] * (ir_width - 1)
+                py = result["data"]["res"]["coords"]["ptc"]["y"] * (ir_height - 1)
+                pixels_img0_at_img1_list.append([px, py])
+
+            except Exception:
+                pixels_img0_at_img1_list.append(None)
+
+        # Format final output
         pixels_img0_at_img1 = np.array([
-            g if g is not None else [np.nan, np.nan]
-            for g in pixels_img0_at_img1_list
-        ]) # TODO: Verify the returned format
+            p if p is not None else [np.nan, np.nan]
+            for p in pixels_img0_at_img1_list
+        ])  # TODO: Verify the returned format
 
         pts_image = self.points0_arrange
         
@@ -255,8 +303,36 @@ class ScanManager:
             [bbox[2], bbox[3]]  # bottom-right
         ]
 
-        # Perform geo-to-pixel projection
-        bbox_list_pixel = self.detector_client.geos_to_pixels(transf, bbox_geo)
+        # Get image resolution for normalization
+        rgb_height, rgb_width = self.config['image']['rgb_size']
+
+        # Initialize results list
+        bbox_list_pixel = []
+
+        # Loop through each coordinate and convert
+        for coord in bbox_geo:  # TODO: verify the api for pixels in batch
+            if coord is None:
+                bbox_list_pixel.append(None)
+                continue
+
+            lat, lon = coord  # already [lat, lon] # TODO: missing alt?
+
+            try:
+                result = self.detector_client.georeg_latlon_to_pixel(
+                    geo_server_base=self.config['detector']['geo_server_base'],
+                    endpoint=self.config['detector']['endpoint_geo2pixel'],
+                    transf16=transf,
+                    lat=lat,
+                    lon=lon,  # TODO: missing alt?
+                    server_id=1
+                )
+                # Get pixel coordinates and de-normalize
+                px = result["data"]["res"]["coords"]["ptc"]["x"] * (rgb_width - 1)
+                py = result["data"]["res"]["coords"]["ptc"]["y"] * (rgb_height - 1)
+                bbox_list_pixel.append([px, py])
+
+            except Exception:
+                bbox_list_pixel.append(None)
 
         bbox_pixels_array = np.array([
             g if g is not None else [np.nan, np.nan]
@@ -264,10 +340,10 @@ class ScanManager:
         ])
 
         bbox_pixels = (
-            np.min(bbox_pixels_array[:, 0]),  # x_min
-            np.min(bbox_pixels_array[:, 1]),  # y_min
-            np.max(bbox_pixels_array[:, 0]),  # x_max
-            np.max(bbox_pixels_array[:, 1])  # y_max
+            int(np.floor(np.min(bbox_pixels_array[:, 0]))),  # x_min
+            int(np.floor(np.min(bbox_pixels_array[:, 1]))),  # y_min
+            int(np.ceil(np.max(bbox_pixels_array[:, 0]))),  # x_max
+            int(np.ceil(np.max(bbox_pixels_array[:, 1])))  # y_max
         ) # TODO: Remove min/max implementation if not needed - based on the return from the detector_client
 
         # === 4. Define crop factors and transformation
@@ -353,156 +429,123 @@ class ScanManager:
         return engine_path
 
 
+# ---------------------------------------------------------------------------
+# GeoReg server method: pixel → lat/lon via HTTP
+# ---------------------------------------------------------------------------
 class DetectorClient:
-    def __init__(self,
-                 server_url: str,
-                 geo_server_address: str = "http://localhost:8080",
-                 server_id: int = 1):
-        self.server_url = server_url.rstrip("/")
-        self.geo_server_address = geo_server_address
-        self.server_id = server_id
+    def __init__(self):
+        pass
 
-    def start(self, transf: List[float], pixel: List[float]) -> bool:
-        if len(transf) != 16:
-            raise ValueError("Transformation matrix must be 16 float values")
+    def normalize_georeg_endpoint(self, ep: str | None) -> str:
+        """
+        Normalize a GeoReg endpoint path so it always starts with '/api/'.
+
+        Examples:
+          None or ''        -> '/api/pixel_to_geo'
+          'pixel_to_geo'    -> '/api/pixel_to_geo'
+          '/pixel_to_geo'   -> '/api/pixel_to_geo'
+          '/api/pixel_to_geo' -> '/api/pixel_to_geo'
+        """
+        default = "/api/pixel_to_geo"
+        if not ep:
+            return default
+        ep = ep.strip()
+        if not ep:
+            return default
+        if ep.startswith("/api/"):
+            return ep
+        if ep == "/api":
+            return default
+        if not ep.startswith("/"):
+            ep = "/" + ep
+        return "/api" + ep
+
+    def georeg_pixel_to_latlon(
+            self,
+            geo_server_base: str,
+            endpoint: str,
+            transf16: List[float],
+            x_01: float,
+            y_01: float,
+            server_id: int = 1,
+            timeout_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Request pixel→geo conversion from the GeoReg server.
+
+        INPUTS:
+          - geo_server_base: e.g. "http://127.0.0.1:9000"
+          - endpoint: usually "/api/pixel_to_geo" (normalized automatically).
+          - transf16: same 16-element transform used in the manual method.
+          - x_01, y_01: pixel coordinates normalized to [0, 1].
+                        TL = (0,0), BR = (1,1).
+          - server_id: GeoReg server id (as in the detector).
+
+        The payload structure mirrors the detector server's query_pixel_to_geo().
+        """
+        ep = self.normalize_georeg_endpoint(endpoint)
+        url = geo_server_base.rstrip("/") + ep
 
         payload = {
-            "geo_server_address": self.geo_server_address,
-            "endpoint": "/pixel_to_geo",
-            "geo_request_message_body": {
-                "server_id": self.server_id,
-                "body": {
-                    "transf": transf,
-                    "pixels": {
-                        "ptc": {
-                            "x": pixel[0],
-                            "y": pixel[1]
-                        }
-                    }
-                }
+            "server_id": int(server_id),
+            "body": {
+                "transf": [float(v) for v in transf16],
+                "pixels": {
+                    "ptc": {"x": float(x_01), "y": float(y_01)}
+                },
             },
-            "geo_response_message_body": {
-                "geo_coordinates": {},
-                "status": None,
-                "timestamp": None
-            }
         }
 
-        try:
-            response = requests.post(f"{self.server_url}/start", json=payload)
-            response.raise_for_status()
-            print("Detector started")
-            return True
-        except requests.RequestException as e:
-            print(f"Start failed: {e}")
-            return False
+        with httpx.Client(timeout=timeout_s) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
-    def stop(self) -> bool:
-        try:
-            response = requests.post(f"{self.server_url}/stop")
-            response.raise_for_status()
-            print("Detector stopped")
-            return True
-        except requests.RequestException as e:
-            print(f"Stop failed: {e}")
-            return False
+        # The detector code expects:
+        #   data["data"]["res"]["coords"]["ptc"] => {'x': lon, 'y': lat}
+        return data
 
-    def pixels_to_geo(self, transf: List[float], pixels: List[List[float]]) -> List[Optional[Tuple[float, float]]]:
-        if len(transf) != 16:
-            raise ValueError("Transformation matrix must be 16 float values")
+    def georeg_latlon_to_pixel(
+            self,
+            geo_server_base: str,
+            endpoint: str,
+            transf16: List[float],
+            lon: float,
+            lat: float,
+            server_id: int = 1,
+            timeout_s: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Request geo→pixel conversion from the GeoReg server.
 
-        results = []
+        INPUTS:
+          - geo_server_base: e.g. "http://127.0.0.1:9000"
+          - endpoint: usually "/api/geo_to_pixel" (normalized automatically).
+          - transf16: same 16-element transform used in the manual method.
+          - lon, lat: geographic coordinates in degrees (WGS84).
+          - server_id: GeoReg server id (as in the detector).
 
-        for pixel in pixels:
-            payload = {
-                "geo_server_address": self.geo_server_address,
-                "endpoint": "/pixel_to_geo",
-                "geo_request_message_body": {
-                    "server_id": self.server_id,
-                    "body": {
-                        "transf": transf,
-                        "pixels": {
-                            "ptc": {
-                                "x": pixel[0],
-                                "y": pixel[1]
-                            }
-                        }
-                    }
+        The payload structure mirrors the detector server's query_geo_to_pixel().
+        """
+        ep = self.normalize_georeg_endpoint(endpoint)
+        url = geo_server_base.rstrip("/") + ep
+
+        payload = {
+            "server_id": int(server_id),
+            "body": {
+                "transf": [float(v) for v in transf16],
+                "coords": {
+                    "ptc": {"x": float(lon), "y": float(lat)}
                 },
-                "geo_response_message_body": {
-                    "geo_coordinates": {},
-                    "status": None,
-                    "timestamp": None
-                }
-            }
+            },
+        }
 
-            try:
-                response = requests.post(f"{self.server_url}/start", json=payload)
-                response.raise_for_status()
-                data = response.json()
-                coords = data.get("geo_coordinates", {}).get("ptc", None)
+        with httpx.Client(timeout=timeout_s) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
 
-                if coords and "x" in coords and "y" in coords:
-                    results.append((coords["x"], coords["y"]))
-                else:
-                    results.append(None)
-
-            except requests.RequestException as e:
-                print(f"pixel_to_geo failed: {e}")
-                results.append(None)
-
-        return results
-
-    def geos_to_pixels(self, transf: List[float], geo_coords: List[List[float]]) -> List[Optional[List[float]]]:
-        if len(transf) != 16:
-            raise ValueError("Transformation matrix must be 16 float values")
-
-        results = []
-
-        for coord in geo_coords:
-            if len(coord) != 3:
-                results.append(None)
-                continue
-
-            lon, lat, alt = coord
-
-            payload = {
-                "geo_server_address": self.geo_server_address,
-                "endpoint": "/geo_to_pixel",
-                "geo_request_message_body": {
-                    "server_id": self.server_id,
-                    "body": {
-                        "transf": transf,
-                        "coords": {
-                            "ptc": {
-                                "x": lon,
-                                "y": lat,
-                                "z": alt
-                            }
-                        }
-                    }
-                },
-                "geo_response_message_body": {
-                    "geo_coordinates": {},
-                    "status": None,
-                    "timestamp": None
-                }
-            }
-
-            try:
-                response = requests.post(f"{self.server_url}/start", json=payload)
-                response.raise_for_status()
-                data = response.json()
-                ptc = data.get("geo_coordinates", {}).get("ptc", None)
-
-                if ptc and "x" in ptc and "y" in ptc:
-                    results.append([ptc["x"], ptc["y"]])
-                else:
-                    results.append(None)
-
-            except requests.RequestException as e:
-                print(f"geo_to_pixel failed: {e}")
-                results.append(None)
-
-        return results
+        # The detector code expects:
+        #   data["data"]["res"]["pixels"]["ptc"] => {'x': x_01, 'y': y_01}
+        return data
 
