@@ -73,7 +73,7 @@ class ScanManager:
                     "yaw_deg": 45.0,
                 },
                 "payload": {
-                    "pitch_deg": -12.0,
+                    "elevation_deg": -12.0,
                     "azimuth_deg": 128.0,
                     "field_of_view_deg": 2.5,
                     "resolution_px": [1920, 1080],
@@ -148,7 +148,7 @@ class ScanManager:
             platform_pitch_deg=metadata["uav"]["pitch_deg"],
             platform_yaw_deg=metadata["uav"]["yaw_deg"],
             sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
-            sensor_elevation_deg=metadata["payload"]["pitch_deg"],
+            sensor_elevation_deg=metadata["payload"]["elevation_deg"],
         )  # angle regarding to world
         hfov = metadata["payload"]["field_of_view_deg"]  # [deg]
 
