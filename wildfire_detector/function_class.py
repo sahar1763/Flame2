@@ -162,8 +162,14 @@ class ScanManager:
         Process a new IR frame using stored Scan0 reference.
         """
         frame_id = metadata["scan_parameters"]["current_scanned_frame_id"] # []
-        h1 = metadata["uav"]["altitude_agl_meters"] # [m]
-        phi1 = metadata["payload"]["pitch_deg"] # [deg] TODO: regarding to world or payload
+        drone_height = metadata["uav"]["altitude_agl_meters"] # [m]
+        projection_angle = camera_angle_from_vertical(
+            platform_roll_deg=metadata["uav"]["roll_deg"],
+            platform_pitch_deg=metadata["uav"]["pitch_deg"],
+            platform_yaw_deg=metadata["uav"]["yaw_deg"],
+            sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
+            sensor_elevation_deg=metadata["payload"]["pitch_deg"],
+        ) # angle regarding to world
         hfov1 = metadata["payload"]["field_of_view_deg"] # [deg]
 
         # Load scan0 image and corners
@@ -178,7 +184,7 @@ class ScanManager:
         # Important Calculation
         rgb_height, rgb_width = self.config['image']['rgb_size'] # [width, height]
         ir_height, ir_width = self.config['image']['ir_size']
-        Slant_Range = h1 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
+        Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
         IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
     
