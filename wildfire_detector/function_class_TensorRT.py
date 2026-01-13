@@ -52,12 +52,12 @@ class ScanManager:
         """
         try:
             image_rgb_size = self.config['image']['rgb_size']
-            H, W = image_rgb_size[0], image_rgb_size[1]
-            dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
+            img_height, img_width = image_rgb_size[0], image_rgb_size[1]
+            dummy_img = np.zeros((img_height, img_width, 3), dtype=np.uint8)
 
             # bbox at the center
-            cx, cy, r = W // 2, H // 2, 140
-            dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
+            bbox_center_x, bbox_center_y, box_half_size = img_width // 2, img_height // 2, 140
+            dummy_bbox = (bbox_center_x - box_half_size, bbox_center_y - box_half_size, bbox_center_x + box_half_size, bbox_center_y + box_half_size)
 
             # TODO: Insert rational values
             self.dummy_md = {
@@ -121,8 +121,8 @@ class ScanManager:
             for (y, x) in pts_image
         ]
 
-        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
-        transf = matrix.astype(float).flatten().tolist()
+        transformation_matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        flatten_transformation_matrix = transformation_matrix.astype(float).flatten().tolist()
 
         # Compute corners and store them
         geo_results = []
@@ -131,7 +131,7 @@ class ScanManager:
             result = self.detector_client.georeg_pixel_to_latlon(
                 geo_server_base=self.config['detector']['geo_server_base'],
                 endpoint=self.config['detector']['endpoint_pixel2geo'],
-                transf16=transf,
+                transf16=flatten_transformation_matrix,
                 x_01=x_01,
                 y_01=y_01,
                 server_id=1
@@ -162,7 +162,7 @@ class ScanManager:
             sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
             sensor_elevation_deg=metadata["payload"]["pitch_deg"],
         )  # angle regarding to world
-        hfov1 = metadata["payload"]["field_of_view_deg"] # [deg]
+        hfov = metadata["payload"]["field_of_view_deg"] # [deg]
 
         # Load scan0 image and corners
         image0 = self.frames[frame_id]
@@ -177,7 +177,7 @@ class ScanManager:
         rgb_height, rgb_width = self.config['image']['rgb_size'] # [width, height]
         ir_height, ir_width = self.config['image']['ir_size']
         Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
-        IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
+        IFOV = hfov / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
     
         fire_length_pixel = np.floor(fire_size / GSD)
@@ -190,8 +190,8 @@ class ScanManager:
         max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
 
         # Reproject and compute homography
-        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
-        transf = matrix.astype(float).flatten().tolist()
+        transformation_matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        flatten_transformation_matrix = transformation_matrix.astype(float).flatten().tolist()
 
         # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
         geo_coords = [
@@ -217,7 +217,7 @@ class ScanManager:
                 result = self.detector_client.georeg_latlon_to_pixel(
                     geo_server_base=self.config['detector']['geo_server_base'],
                     endpoint=self.config['detector']['endpoint_geo2pixel'],
-                    transf16=transf,
+                    transf16=flatten_transformation_matrix,
                     lat=lat,
                     lon=lon,  # TODO: missing alt?
                     server_id=1
@@ -237,11 +237,11 @@ class ScanManager:
         ])  # TODO: Verify the returned format
 
         pts_image = self.points0_arrange
-        
-        H = create_homography(pts_image, pixels_img0_at_img1)
+
+        homography_mat = create_homography(pts_image, pixels_img0_at_img1)
 
         # Warp image0 to image1 frame
-        image0_proj = cv2.warpPerspective(image0, H, (image1.shape[1], image1.shape[0]),
+        image0_proj = cv2.warpPerspective(image0, homography_mat, (image1.shape[1], image1.shape[0]),
                                           cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=np.median(image0))
 
@@ -274,7 +274,7 @@ class ScanManager:
             height = bbox[3] - bbox[1]
             fire_size_IR = max(width, height)
             fire_size_RGB = fire_size_IR * IR2RGB_ratio
-            fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
+            fov = hfov / (ratio_image * rgb_height / fire_size_RGB)
             required_fov2.append(round(np.clip(fov, min_fov, max_fov), 2))
 
         # Return structured result
@@ -299,8 +299,8 @@ class ScanManager:
 
         # === 3. Define bbox
         # Reproject and compute homography
-        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
-        transf = matrix.astype(float).flatten().tolist()
+        transformation_matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        flatten_transformation_matrix = transformation_matrix.astype(float).flatten().tolist()
 
         # Convert bbox [lat1, lon1, lat2, lon2] to [[lat1, lon1], [lat2, lon2]]
         bbox = metadata["investigation_parameters"]["detected_bounding_box"]
@@ -327,7 +327,7 @@ class ScanManager:
                 result = self.detector_client.georeg_latlon_to_pixel(
                     geo_server_base=self.config['detector']['geo_server_base'],
                     endpoint=self.config['detector']['endpoint_geo2pixel'],
-                    transf16=transf,
+                    transf16=flatten_transformation_matrix,
                     lat=lat,
                     lon=lon,  # TODO: missing alt?
                     server_id=1

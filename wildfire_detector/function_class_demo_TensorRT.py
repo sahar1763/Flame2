@@ -57,12 +57,12 @@ class ScanManager:
         """
         try:
             image_rgb_size = self.config['image']['rgb_size']
-            H, W = image_rgb_size[0], image_rgb_size[1]
-            dummy_img = np.zeros((H, W, 3), dtype=np.uint8)
+            img_height, img_width = image_rgb_size[0], image_rgb_size[1]
+            dummy_img = np.zeros((img_height, img_width, 3), dtype=np.uint8)
 
             # bbox at the center
-            cx, cy, r = W // 2, H // 2, 140
-            dummy_bbox = (cx - r, cy - r, cx + r, cy + r)
+            bbox_center_x, bbox_center_y, box_half_size = img_width // 2, img_height // 2, 140
+            dummy_bbox = (bbox_center_x - box_half_size, bbox_center_y - box_half_size, bbox_center_x + box_half_size, bbox_center_y + box_half_size)
 
             # TODO: Insert rational values
             self.dummy_md = {
@@ -115,8 +115,8 @@ class ScanManager:
         # Create corners:
         pts_image = self.points0_arrange
 
-        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
-        transf = matrix.astype(float).flatten().tolist()
+        transformation_matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        flatten_transformation_matrix = transformation_matrix.astype(float).flatten().tolist()
 
         img_size = self.config["image"]["ir_size"]
         phi_deg = metadata["uav"]["pitch_deg"]
@@ -128,7 +128,7 @@ class ScanManager:
         # pixels = [[int(x), int(y)] for (y, x) in pts_image]
         #
         # # Compute corners and store them
-        # geo_results = self.detector_client.pixels_to_geo(transf, pixels)
+        # geo_results = self.detector_client.pixels_to_geo(flatten_transformation_matrix, pixels)
         #
         # ground_corners = np.array([
         #     g if g is not None else [np.nan, np.nan]
@@ -150,7 +150,7 @@ class ScanManager:
             sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
             sensor_elevation_deg=metadata["payload"]["pitch_deg"],
         )  # angle regarding to world
-        hfov1 = metadata["payload"]["field_of_view_deg"]  # [deg]
+        hfov = metadata["payload"]["field_of_view_deg"]  # [deg]
 
         # Load scan0 image and corners
         image0 = self.frames[frame_id]
@@ -165,7 +165,7 @@ class ScanManager:
         rgb_height, rgb_width = self.config['image']['rgb_size']  # [width, height]
         ir_height, ir_width = self.config['image']['ir_size']
         Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
-        IFOV = hfov1 / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
+        IFOV = hfov / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
 
         fire_length_pixel = np.floor(fire_size / GSD)
@@ -178,8 +178,8 @@ class ScanManager:
         max_fov = self.config['fov']['max_deg']  # degrees - maximal allowed FOV
 
         # Reproject and compute homography
-        matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
-        transf = matrix.astype(float).flatten().tolist()
+        transformation_matrix = np.array(metadata["geolocation"]["transformation_matrix"])  # should be shape (4, 4)
+        flatten_transformation_matrix = transformation_matrix.astype(float).flatten().tolist()
 
         # # Convert Geo coordinates [lon, lat] -> [lat, lon] for API compatibility
         # geo_coords = [
@@ -188,7 +188,7 @@ class ScanManager:
         # ]
         #
         # # Get projected pixel coordinates in image1
-        # pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(transf, geo_coords)
+        # pixels_img0_at_img1_list = self.detector_client.geos_to_pixels(flatten_transformation_matrix, geo_coords)
         #
         # pixels_img0_at_img1 = np.array([
         #     g if g is not None else [np.nan, np.nan]
@@ -204,10 +204,10 @@ class ScanManager:
 
         pts_image = self.points0_arrange
 
-        H = create_homography(pts_image, pixels_img0_at_img1)
+        homography_mat = create_homography(pts_image, pixels_img0_at_img1)
 
         # Warp image0 to image1 frame
-        image0_proj = cv2.warpPerspective(image0, H, (image1.shape[1], image1.shape[0]),
+        image0_proj = cv2.warpPerspective(image0, homography_mat, (image1.shape[1], image1.shape[0]),
                                           cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=np.median(image0))
 
@@ -241,7 +241,7 @@ class ScanManager:
             height = bbox[3] - bbox[1]
             fire_size_IR = max(width, height)
             fire_size_RGB = fire_size_IR * IR2RGB_ratio
-            fov = hfov1 / (ratio_image * rgb_height / fire_size_RGB)
+            fov = hfov / (ratio_image * rgb_height / fire_size_RGB)
             required_fov2.append(round(np.clip(fov, min_fov, max_fov), 2))
 
         # Return structured result
