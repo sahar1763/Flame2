@@ -106,6 +106,8 @@ dataset_FOR_IAI/c_1/
 results/
 results0/
 dataset_FOR_IAI/
+results_demoPackage/
+wandb/
 
 *.VOB
 
