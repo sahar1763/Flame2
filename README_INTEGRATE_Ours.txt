@@ -56,7 +56,7 @@ metadata = {
         "pitch_deg": 10.0,
         "field_of_view_deg": 45.0
     },
-    "transformation_matrix": np.eye(4).tolist()  # Identity for test
+    "transformation_matrix": np.eye(4, dtype=float).ravel(order="C").tolist()  # Identity for test
 }
 
 # === Phase 0: Save reference frame and corner projection ===

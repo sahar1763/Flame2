@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import time
 import torch
 import torch.nn.functional as F
@@ -45,7 +46,7 @@ def crop_bbox_scaled(image, bbox, crop_factor, min_cropsize=None):
     print(croppedImage.shape)
 
     # Crop and return
-    return image[y1:y2, x1:x2, :]
+    return croppedImage
 
 
 def plot_crops_with_predictions(original_image, crops_np, predictions, confidences, final_pred, final_conf, bbox=None):
@@ -77,18 +78,26 @@ def plot_crops_with_predictions(original_image, crops_np, predictions, confidenc
                                  linewidth=2, edgecolor='red', facecolor='none')
         axs[0].add_patch(rect)
 
+    save_dir = "results_demoPackage"
+    filename = "crops_phase2"
+    os.makedirs(save_dir, exist_ok=True)
     # === Cropped patches with predictions
     for i, (crop, pred, conf) in enumerate(zip(crops_np, predictions, confidences)):
+        ax = axs[i + 1]
         if crop.size == 0:
-            axs[i + 1].axis('off')
-            axs[i + 1].set_title(f"Crop {i + 1}\nEMPTY")
+            ax.axis('off')
+            ax.set_title(f"Crop {i + 1}\nEMPTY")
             continue
-        axs[i + 1].imshow(crop)
-        axs[i + 1].set_title(f"Crop {i + 1}\n{pred} ({conf:.2f})")
-        axs[i + 1].axis('off')
+        ax.imshow(crop)
+        ax.set_title(f"Crop {i + 1}\n{pred} ({conf:.2f})")
+        ax.axis('off')
 
     plt.tight_layout()
-    plt.show()
+
+    # Save instead of show
+    save_path = os.path.join(save_dir, filename)
+    plt.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
 
 
 def predict_crops_majority_vote(crops, model, bbox, device,
@@ -138,9 +147,25 @@ def predict_crops_majority_vote(crops, model, bbox, device,
     confidence_scores = probs.max(dim=1).values.cpu().numpy().tolist()
     fire_votes = (preds == 1).sum().item()
     vote_ratio = fire_votes / len(crops)
-    final_class = 1 if vote_ratio > 0.6 else 0
+    final_class = 1 if vote_ratio > 0.5 else 0
     final_label = label_names[final_class]
-    avg_conf = probs[:, final_class].mean().item()
+    # avg_conf = probs[:, final_class].mean().item()
+
+    preds_np = preds.cpu().numpy()
+    probs_np = probs.cpu().numpy()
+
+    # confidence of each prediction (max softmax)
+    pred_conf = probs_np[np.arange(len(preds_np)), preds_np]
+
+    # agreement-aware confidence
+    conf_effective = np.where(
+        preds_np == final_class,
+        pred_conf,
+        1.0 - pred_conf
+    )
+
+    avg_conf = float(conf_effective.mean())
+
     times['postprocess'] = time.perf_counter() - t4
 
     total_time = time.perf_counter() - t0
@@ -163,11 +188,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
             bbox=bbox
         )
 
-    return {
-        "final_prediction": final_label,
-        "confidence": avg_conf,
-        "bbox": bbox
-    } # TODO: Update the return based on ICD
+    return final_label, avg_conf
 
 
 def predict_crops_majority_vote_RT(crops, model, bbox,
@@ -196,7 +217,8 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     t3 = time.perf_counter()
     outputs = model.infer(np_batch)  # returns raw logits (N,num_classes)
     outputs = outputs.reshape(-1, 2)  # e.g., num_classes = 2
-    probs = np.exp(outputs) / np.sum(np.exp(outputs), axis=1, keepdims=True)  # softmax
+    exp_logits = np.exp(outputs - np.max(outputs, axis=1, keepdims=True))
+    probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True) # Softmax
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
     times['inference'] = time.perf_counter() - t3
@@ -206,9 +228,20 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     pred_labels = [label_names[p] for p in preds]
     fire_votes = (preds == 1).sum()
     vote_ratio = fire_votes / len(crops)
-    final_class = 1 if vote_ratio > 0.6 else 0
+    final_class = 1 if vote_ratio > 0.5 else 0
     final_label = label_names[final_class]
-    avg_conf = float(np.mean(probs[:, final_class]))
+    # avg_conf = float(np.mean(probs[:, final_class]))
+
+    pred_conf = probs[np.arange(len(preds)), preds]
+
+    conf_effective = np.where(
+        preds == final_class,
+        pred_conf,
+        1.0 - pred_conf
+    )
+
+    avg_conf = float(conf_effective.mean())
+
     times['postprocess'] = time.perf_counter() - t4
 
     total_time = time.perf_counter() - t0
@@ -231,8 +264,4 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
             bbox=bbox
         )
 
-    return {
-        "final_prediction": final_label,
-        "confidence": avg_conf,
-        "bbox": bbox
-    }
+    return final_label, avg_conf

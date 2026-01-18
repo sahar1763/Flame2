@@ -81,6 +81,10 @@ detector:
   geo_server_base: "http://127.0.0.1:9000"
   endpoint_pixel2geo: "/api/pixel_to_geo"
   endpoint_geo2pixel: "/api/geo_to_pixel"
+  # GeoReg server id
+  server_id: 1
+  # HTTP timeout (seconds)
+  timeout_s: 5.0
 
 # ---------------------------------------------------
 # Warmup

@@ -226,7 +226,7 @@ def pixel2geo(theta_deg, phi_deg, h=2500, x=0, y=7500, hfov_deg=17.5, img_size=[
     for d in world_dirs:
         scale = -h / d[2]
         point = np.array([x, y, h]) + scale * d
-        corners_world.append(point[:2])
+        corners_world.append(point)
     return np.array(corners_world)
 
 

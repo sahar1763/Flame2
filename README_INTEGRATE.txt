@@ -37,7 +37,7 @@ metadata = {
     },
     "geolocation": {
         "latitude": 31.0461,
-        "transformation_matrix": np.eye(4).tolist(),
+        "transformation_matrix": np.eye(4, dtype=float).ravel(order="C").tolist(),
         "longitude": 34.8516,
     },
     "investigation_parameters": {

@@ -60,10 +60,10 @@ def geo2pixel(corners_0, theta1, phi1, h1=2500, x1=0, y1=7500, hfov1=17.5, img_s
     #   ], dtype=np.float32)
     
     # Step 2: Compute homography that maps world coordinates (corners_1) to image1 pixels
-    H_world_to_image1 = create_homography(pts_image, corners_1)
+    H_world_to_image1 = create_homography(pts_image, corners_1[:,:2])
     
     # Step 3: Project the world-space corners of image0 (corners_0) into image1's pixel space
-    pixels_img0_at_img1 = project_points_with_homography(corners_0, H_world_to_image1)
+    pixels_img0_at_img1 = project_points_with_homography(corners_0[:,:2], H_world_to_image1)
 
     return pixels_img0_at_img1, corners_1
 

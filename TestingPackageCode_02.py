@@ -243,7 +243,7 @@ if __name__ == "__main__":
 
     # Creating metadata for phase2:
     metadata = copy.deepcopy(sm.dummy_md)
-    metadata["investigation_parameters"]["detected_bounding_box"] = [960-140, 540-140, 960+140, 540+140]
+    metadata["investigation_parameters"]["detected_bounding_box"] = [540-140, 960-140, 0, 540+140, 960+140, 0]
 
     print("\033[1;96m=== Starting phase2 ===\033[0m")
     for i in range(10):
