@@ -139,15 +139,55 @@ def create_synthetic_image_with_clusters(image_height, image_width,
         # 5. Compute 2D Gaussian mask centered at (cx, cy)
         y, x = np.meshgrid(np.arange(image_height), np.arange(image_width), indexing='ij')
         dist_sq = (x - cx) ** 2 + (y - cy) ** 2
-        cluster_value = np.random.randint(cluster_value - 50, cluster_value + 50)
-        gaussian_blob = cluster_value * np.exp(-dist_sq / (4 * (radius ** 2)))
+        cluster_value_temp = np.random.randint(cluster_value - 50, cluster_value + 50)
+        gaussian_blob = cluster_value_temp * np.exp(-dist_sq / (4 * (radius ** 2)))
 
         # 6. Update the image with the cluster (take maximum where overlapping)
         image = np.maximum(image, gaussian_blob)
-        
+
 
     return image, num_clusters, cluster_centers
 
+
+# def create_synthetic_image_with_clusters(
+#         image_height, image_width,
+#         background_range=(3, 7),
+#         cluster_value=200,
+#         num_clusters_range=(1, 4),
+#         cluster_radius_range=(1, 9)):
+#     """
+#     Creates a synthetic image with uniform random background and uniform circular clusters.
+#     """
+#     # 1. Uniform background
+#     image = np.random.uniform(*background_range, size=(image_height, image_width)).astype(np.uint8)
+#
+#     # 2. Number of clusters
+#     num_clusters = np.random.randint(num_clusters_range[0], num_clusters_range[1] + 1)
+#     cluster_centers = []
+#
+#     # Coordinate grid for distance calculations
+#     y_grid, x_grid = np.meshgrid(np.arange(image_height), np.arange(image_width), indexing='ij')
+#
+#     for _ in range(num_clusters):
+#         # 3. Random center
+#         cx = np.random.randint(0, image_width)
+#         cy = np.random.randint(0, image_height)
+#         cluster_centers.append((cx, cy))
+#
+#         # 4. Random radius
+#         radius = np.random.randint(cluster_radius_range[0], cluster_radius_range[1] + 1)
+#
+#         # 5. Random cluster intensity
+#         cluster_value_temp = np.random.randint(cluster_value - 50, cluster_value + 50)
+#
+#         # 6. Create mask for circle
+#         dist_sq = (x_grid - cx) ** 2 + (y_grid - cy) ** 2
+#         mask = dist_sq <= radius ** 2
+#
+#         # 7. Apply uniform value
+#         image[mask] = cluster_value_temp
+#
+#     return image, num_clusters, cluster_centers
 
 
 def add_uniform_spots(image,
@@ -288,31 +328,94 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
     return centers, label_map, bboxes
 
 
-def compute_cluster_scores(label_map, image1, GSD, norm_size=5**2, norm_intensity=200):
+def compute_cluster_scores(
+    label_map,
+    image1,
+    GSD,
+    norm_size=5**2,
+    norm_intensity=200,
+    weights=(0.5, 0.5, 10, 0.4),
+):
     """
-    Computes a score for each labeled cluster in the label_map based on pixel intensity.
+    Compute a confidence score ∈ [0,1] for each detected fire cluster based on
+    its spatial size and thermal intensity.
 
-    Parameters:
-        label_map (np.ndarray): 2D array with cluster labels (e.g., from DBSCAN), shape (H, W)
-        image1 (np.ndarray): Grayscale or single-channel image, shape (H, W)
-        GSD (float): Ground Sample Distance (meters/pixel)
+    The score favors clusters that are both:
+    - spatially large (big area on ground)
+    - thermally strong (high mean pixel intensity)
 
-    Returns:
-        dict: {label: score}, excluding label -1 (background/noise)
+    The process:
+    1. Compute fire area in m² and normalize to [0,1]
+    2. Compute mean intensity and normalize to [0,1]
+    3. Fuse the two with a weighted sum
+    4. Pass the result through a sigmoid to obtain a smooth confidence score
+
+    Parameters
+    ----------
+    label_map : np.ndarray
+        2D array with cluster labels (H×W).
+        Label -1 is treated as background/noise.
+
+    image1 : np.ndarray
+        Single-channel thermal or intensity image (H×W).
+
+    GSD : float
+        Ground Sample Distance [meters/pixel].
+
+    norm_size : float
+        Area normalization constant [m²].
+        Clusters larger than this saturate size contribution.
+
+    norm_intensity : float
+        Intensity normalization constant.
+        Mean intensities higher than this saturate intensity contribution.
+
+    weights : tuple (wI, wA, k, t)
+        wI : weight of intensity contribution
+        wA : weight of area contribution
+        k  : sigmoid steepness (larger → sharper transition)
+        t  : sigmoid threshold (center point)
+
+    Returns
+    -------
+    dict
+        {label: score} mapping, where score ∈ [0,1].
+        Higher score means higher likelihood of a real fire.
     """
+
     scores = {}
     unique_labels = np.unique(label_map)
+    wI, wA, k, t = weights
 
     for label in unique_labels:
         if label == -1:
-            continue  # Skip noise label
+            continue
 
         mask = (label_map == label)
-        total_intensity = np.sum(image1[mask])
-        denom = norm_size * norm_intensity / (GSD ** 2)
-        score = total_intensity / denom
+        fire_area_pixel = np.sum(mask)
+
+        if fire_area_pixel == 0:
+            scores[label] = 0
+            continue
+
+        # --- Area term ---
+        fire_area_m2 = fire_area_pixel * (GSD ** 2)
+        # Clipping to avoid to dominant extreme values of one of the components in the sigmoid score function
+        A_norm = np.clip(fire_area_m2 / norm_size, 0, 1.5)
+
+        # --- Intensity term ---
+        mean_intensity = image1[mask].mean() # TODO: Use max instead?
+        # Clipping to avoid to dominant extreme values of one of the components in the sigmoid score function
+        I_norm = np.clip(mean_intensity / norm_intensity, 0, 1.5)
+
+        # --- Fusion ---
+        grade = wI * I_norm + wA * A_norm
+
+        # --- Sigmoid shaping ---
+        score = 1.0 / (1.0 + np.exp(-k * (grade - t)))
         score = np.clip(score, 0, 1)
-        scores[label] = round(score, 1)
+
+        scores[label] = round(score, 3)
 
 
     return scores

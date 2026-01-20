@@ -117,7 +117,7 @@ def Creating_Phase1_input(PHI, THETA, h0, hfov0, metadata, config):
         ir_height, ir_width = config['image']['ir_size']
         Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         HFOV = hfov1  # Horizontal field of view (degrees)
-        IFOV = HFOV / rgb_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
+        IFOV = HFOV / ir_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
 
         fire_length_pixel = np.floor(fire_size / GSD)

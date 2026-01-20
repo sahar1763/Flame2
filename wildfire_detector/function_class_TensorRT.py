@@ -64,14 +64,14 @@ class ScanManager:
             self.dummy_md = {
                 "uav": {
                     "altitude_agl_meters": 2400.0,
-                    "roll_deg": 0.5,
-                    "pitch_deg": -1.2,
-                    "yaw_deg": 45.0,
+                    "roll_deg": 0,
+                    "pitch_deg": 0,
+                    "yaw_deg": 0,
                 },
                 "payload": {
-                    "elevation_deg": -12.0,
-                    "azimuth_deg": 128.0,
-                    "field_of_view_deg": 2.5,
+                    "elevation_deg": -90,
+                    "azimuth_deg": 0,
+                    "field_of_view_deg": 2.2,
                     "resolution_px": [1920, 1080],
                 },
                 "geolocation": {
@@ -164,10 +164,10 @@ class ScanManager:
         rgb_height, rgb_width = self.config['image']['rgb_size']  # [width, height]
         ir_height, ir_width = self.config['image']['ir_size']
         Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
-        IFOV = hfov / rgb_width / 180 * np.pi  # Instantaneous Field of View [urad]
+        IFOV = hfov / ir_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
 
-        fire_length_pixel = np.floor(fire_size / GSD)
+        fire_length_pixel = np.max([np.floor(fire_size / GSD),1]) # if expected fire below 1 pixel search for fire of at least 1 pixel
         fire_num_pixel = fire_length_pixel ** 2
 
         # FOV calc for Phase 2
@@ -209,8 +209,8 @@ class ScanManager:
                                               temp_threshold=self.config['postprocessing']['temp_threshold'])
 
         # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
-        min_samples = int(np.ceil(fire_num_pixel / min_samples_factor))
-        eps_distance = int(np.floor(fire_length_pixel * eps_distance_factor))
+        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2)* np.sqrt(eps_distance_factor))),1,10)) # Need to verify that expected pixels are within the radius
+        min_samples = int(np.floor(min_samples_factor * eps_distance ** 2))
         # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
         # === Phase 1: Clustering ===
         centers_pixels, label_map, bboxes_pixels = find_cluster_centers_conditional(
@@ -231,7 +231,8 @@ class ScanManager:
             image1,
             GSD,
             norm_size=self.config['scoring']['norm_size'],
-            norm_intensity=self.config['scoring']['norm_intensity']
+            norm_intensity=self.config['scoring']['norm_intensity'],
+            weights=self.config['scoring']['scaling_weights'],
         )  # TODO (Maayan) switch to intensity parameter according to assaf instructions
 
         # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===

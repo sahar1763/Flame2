@@ -26,7 +26,7 @@ grid:
 # ---------------------------------------------------
 
 fire:
-  max_size_m: 3                # Max estimated fire length [meters]
+  max_size_m: 3              # Max estimated fire length [meters]
   ratio_in_rgb_image: 0.25     # Required fire size ratio within the RGB image
 
 # ---------------------------------------------------
@@ -49,8 +49,8 @@ postprocessing:
 # ---------------------------------------------------
 
 dbscan:
-  min_samples_factor: 10        # Factor to determine min_samples = fire_size * factor
-  eps_distance_factor: 1.5      # Factor to scale DBSCAN radius (eps)
+  min_samples_factor: 1        # Ratio to determine min_samples of fire pixels in the search radius to be recognized as cluster (min_samples_factor = 1 -> the ratio is 1/pi~1/3)
+  eps_distance_factor: 0.25      # Factor to scale DBSCAN radius (eps) - min_samples = eps^2 -> eps = (L_fire_in_pixels/2)*eps_distance_factor
   diff_threshold: 50           # Minimum difference between frames to consider a pixel as active
   min_contrast: 10              # Minimum contrast for selecting cluster centers
 
@@ -59,9 +59,9 @@ dbscan:
 # ---------------------------------------------------
 
 scoring:
-  norm_size: 25                 # Normalized cluster size (e.g., 5x5 pixels)
+  norm_size: 25                 # Fire area threshold [m^2]
   norm_intensity: 200           # Normalized average cluster intensity
-
+  scaling_weights: [0.5, 0.5, 10, 0.4]   # (wI, wA, k, t) scaling parameters for sigmoid calculation
 
 # ---------------------------------------------------
 # Phase 2 Parameters
