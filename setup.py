@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
 
     name='wildfire_detector',
-    version='0.1.3',
+    version='0.1.4',
     packages=find_packages(),
 
     install_requires=[
@@ -16,6 +16,7 @@ setup(
         "numpy",  # for np
         "scikit-learn",  # for DBSCAN
         "matplotlib",  # for matplotlib.pyplot, patches
+        "httpx", # Connection with the LLA server
     ],
 
     include_package_data=True,

@@ -1,4 +1,5 @@
 # Create the package:
+## Update version in setup file
 # pip install build
 # python -m build
 # pip install dist/wildfire_detector-0.1.2-py3-none-any.whl

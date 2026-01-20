@@ -272,7 +272,7 @@ class ScanManager:
             }) # Not similar to real output, ICD is different and output is in pixels and not geo
 
         # Plots of phase1 for debugging
-        plot_phase1(diff_map, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
+        # plot_phase1(diff_map, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
 
         return results
 
