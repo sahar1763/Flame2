@@ -323,7 +323,7 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
         # Determine BBox
         min_i, min_j = cluster_points.min(axis=0)
         max_i, max_j = cluster_points.max(axis=0)
-        bboxes.append((min_i, min_j, max_i, max_j))
+        bboxes.append((min_i, min_j, max_i+1, max_j+1))
 
     return centers, label_map, bboxes
 
