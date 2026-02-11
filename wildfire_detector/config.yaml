@@ -59,7 +59,7 @@ dbscan:
 # ---------------------------------------------------
 
 scoring:
-  norm_size: 25                 # Fire area threshold [m^2]
+  norm_size: 9                 # Fire area threshold [m^2] ,  equal to max_size_m^2
   norm_intensity: 200           # Normalized average cluster intensity
   scaling_weights: [0.5, 0.5, 10, 0.4]   # (wI, wA, k, t) scaling parameters for sigmoid calculation
 
