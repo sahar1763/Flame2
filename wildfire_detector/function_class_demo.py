@@ -336,7 +336,7 @@ class ScanManager:
 
         for crop_factor in crop_factors:
             # Crop the image (NumPy RGB)
-            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor)
+            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=self.config['phase2']['net_image_size'])
             cropped_images_np.append(cropped_np)  # Save for plotting
 
             # Convert to PIL and apply transforms
@@ -360,7 +360,7 @@ class ScanManager:
 
         # Output is different in demo mode according to debug results # TODO : optional, convert to geo and adjust return
         result = {
-            "final_prediction": final_label,
+            "final_prediction": final_label,  # 1 - Fire, 0 - No Fire
             "confidence": avg_conf,
             "bbox": bbox
         } # Not same as in the real code

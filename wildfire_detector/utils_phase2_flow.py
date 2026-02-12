@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+
 def crop_bbox_scaled(image, bbox, crop_factor, min_cropsize=None):
     """
     Crop an RGB image around a bounding box, enlarging it by a crop factor.
@@ -19,33 +20,49 @@ def crop_bbox_scaled(image, bbox, crop_factor, min_cropsize=None):
     Returns:
         np.ndarray: Cropped RGB image
     """
-    x_min, y_min, x_max, y_max = bbox
+    H, W = image.shape[:2]
+    c_min, r_min, c_max, r_max = bbox
 
-    # Calculate bbox center
-    center_x = (x_min + x_max) // 2
-    center_y = (y_min + y_max) // 2
+    # --- pixel geometry ---
+    bbox_height = r_max - r_min
+    bbox_width = c_max - c_min
+    max_dim = max(bbox_height, bbox_width, 1)
 
-    # Get max side of the bbox
-    bbox_width = x_max - x_min
-    bbox_height = y_max - y_min
-    max_dim = max(bbox_width, bbox_height)
     if min_cropsize is not None:
         max_dim = max(max_dim, min_cropsize)
 
-    # Final crop size
     crop_size = int(np.ceil(max_dim * crop_factor))
-    half_crop = crop_size // 2
+    crop_size = max(crop_size, 1)
+    half = crop_size / 2.0
 
-    # Compute crop bounds
-    y1 = max(center_y - half_crop, 0)
-    y2 = min(center_y + half_crop, image.shape[0])
-    x1 = max(center_x - half_crop, 0)
-    x2 = min(center_x + half_crop, image.shape[1])
+    # --- true geometric center (float) ---
+    center_r = (r_min + r_max) / 2.0
+    center_c = (c_min + c_max) / 2.0
 
-    croppedImage = image[y1:y2, x1:x2, :]
-    print(croppedImage.shape)
+    r1 = int(round(center_r - half))
+    c1 = int(round(center_c - half))
+    r2 = r1 + crop_size
+    c2 = c1 + crop_size
 
-    # Crop and return
+    # --- shift window if outside image (DON’T SHRINK) ---
+    if r1 < 0:
+        r2 -= r1
+        r1 = 0
+    if c1 < 0:
+        c2 -= c1
+        c1 = 0
+    if r2 > H:
+        r1 -= (r2 - H)
+        r2 = H
+    if c2 > W:
+        c1 -= (c2 - W)
+        c2 = W
+
+    r1 = max(r1, 0)
+    c1 = max(c1, 0)
+
+    croppedImage = image[r1:r2, c1:c2, :]
+
     return croppedImage
 
 
@@ -79,7 +96,7 @@ def plot_crops_with_predictions(original_image, crops_np, predictions, confidenc
         axs[0].add_patch(rect)
 
     save_dir = "results_demoPackage"
-    filename = "crops_phase2"
+    filename = "crops_phase2.png"
     os.makedirs(save_dir, exist_ok=True)
     # === Cropped patches with predictions
     for i, (crop, pred, conf) in enumerate(zip(crops_np, predictions, confidences)):
@@ -111,6 +128,10 @@ def predict_crops_majority_vote(crops, model, bbox, device,
     t0 = time.perf_counter()
     model.eval()
 
+# Protection if there are no crops
+    if len(crops) == 0:
+        return "No Fire", 0.0
+
     # Stage 1: Stack crops
     t1 = time.perf_counter()
     batch = torch.stack(crops)
@@ -133,7 +154,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
     if device.type == 'cuda':
         torch.cuda.synchronize()
     t3 = time.perf_counter()
-    with torch.no_grad():
+    with torch.inference_mode(): # TODO: Originally "with torch.no_grad():"
         outputs = model(batch)
         probs = F.softmax(outputs, dim=1)
         preds = torch.argmax(probs, dim=1)
@@ -147,7 +168,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
     confidence_scores = probs.max(dim=1).values.cpu().numpy().tolist()
     fire_votes = (preds == 1).sum().item()
     vote_ratio = fire_votes / len(crops)
-    final_class = 1 if vote_ratio > 0.5 else 0
+    final_class = 1 if vote_ratio >= 0.5 else 0
     final_label = label_names[final_class]
     # avg_conf = probs[:, final_class].mean().item()
 
@@ -188,7 +209,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
             bbox=bbox
         )
 
-    return final_label, avg_conf
+    return final_class, avg_conf
 
 
 def predict_crops_majority_vote_RT(crops, model, bbox,
@@ -203,6 +224,10 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     times = {}
     t0 = time.perf_counter()
 
+    # Protection if there are no crops
+    if len(crops) == 0:
+        return "No Fire", 0.0
+
     # Stage 1: Stack crops (Torch -> one batch tensor)
     t1 = time.perf_counter()
     batch = torch.stack(crops)  # (N,C,H,W)
@@ -216,9 +241,9 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     # Stage 3: Inference with TensorRT
     t3 = time.perf_counter()
     outputs = model.infer(np_batch)  # returns raw logits (N,num_classes)
-    outputs = outputs.reshape(-1, 2)  # e.g., num_classes = 2
+    outputs = outputs.reshape(-1, 2).astype(np.float32)  # e.g., num_classes = 2
     exp_logits = np.exp(outputs - np.max(outputs, axis=1, keepdims=True))
-    probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True) # Softmax
+    probs = exp_logits / (np.sum(exp_logits, axis=1, keepdims=True) + 1e-12) # Softmax
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
     times['inference'] = time.perf_counter() - t3
@@ -228,7 +253,7 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     pred_labels = [label_names[p] for p in preds]
     fire_votes = (preds == 1).sum()
     vote_ratio = fire_votes / len(crops)
-    final_class = 1 if vote_ratio > 0.5 else 0
+    final_class = 1 if vote_ratio >= 0.5 else 0
     final_label = label_names[final_class]
     # avg_conf = float(np.mean(probs[:, final_class]))
 
@@ -264,4 +289,4 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
             bbox=bbox
         )
 
-    return final_label, avg_conf
+    return final_class, avg_conf

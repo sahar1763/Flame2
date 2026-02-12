@@ -381,7 +381,7 @@ class ScanManager:
 
         for crop_factor in crop_factors:
             # Crop the image (NumPy RGB)
-            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor)
+            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=self.config['phase2']['net_image_size'])
             cropped_images_np.append(cropped_np)  # Save for plotting
 
             # Convert to PIL and apply transforms
@@ -403,7 +403,7 @@ class ScanManager:
         )
 
         result = {
-            "fire_existence": final_label,
+            "fire_existence": final_label,  # 1 - Fire, 0 - No Fire
             "confidence_pct": avg_conf,
             "valid_scan" : int(valid_scan),
             "latitude": metadata["investigation_parameters"]["detection_latitude"],
