@@ -246,12 +246,12 @@ def create_synthetic_image_with_clusters(image_height, image_width,
     cluster_centers = []
 
     for _ in range(num_clusters):
-        # 3. Random cluster center (cx, cy)
-        cx = np.random.randint(0, image_width)
+        # 3. Random cluster center (cy, cx)
         cy = np.random.randint(0, image_height)
+        cx = np.random.randint(0, image_width)
 
         # Save the center
-        cluster_centers.append((cx, cy))
+        cluster_centers.append((cy, cx))
 
         # 4. Random radius for the Gaussian cluster
         radius = np.random.randint(cluster_radius_range[0], cluster_radius_range[1] + 1)
@@ -264,7 +264,7 @@ def create_synthetic_image_with_clusters(image_height, image_width,
         gaussian_blob = cluster_value_temp * np.exp(-dist_sq / (4 * (radius ** 2)))
 
         # 6. Update the image with the cluster (take maximum where overlapping)
-        image = np.maximum(image, gaussian_blob)
+        image = np.maximum(image, gaussian_blob).astype(np.uint8)
 
     return image, num_clusters, cluster_centers
 
@@ -326,6 +326,9 @@ def add_uniform_spots(image,
     height, width = image.shape
     num_spots = np.random.randint(*num_spots_range)
 
+    # Create meshgrid in size of image dimensions
+    y, x = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+
     for _ in range(num_spots):
         # Random center
         cx = np.random.randint(0, width)
@@ -335,7 +338,6 @@ def add_uniform_spots(image,
         radius = np.random.randint(*spot_radius_range)
 
         # Build mask of circular region
-        y, x = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
         dist_sq = (x - cx) ** 2 + (y - cy) ** 2
         mask = dist_sq <= radius ** 2
 
@@ -404,7 +406,7 @@ def Creating_Scan1_Frame(fire_length_pixel, image_size):
         background_range=(3, 7),  # Simulate a low-intensity background
         cluster_value=200,  # Peak intensity for simulated "fire" clusters
         num_clusters_range=(1, 4),
-        cluster_radius_range=(np.round(fire_length_pixel / 6), np.round(fire_length_pixel / 2))
+        cluster_radius_range=(int(np.round(fire_length_pixel / 6)), int(np.round(fire_length_pixel / 2)))
     )
 
     # # Add uniformly noisy spots to simulate false detections or thermal clutter
@@ -448,7 +450,7 @@ def Creating_Phase1_input(PHI, THETA, x0, y0, h0, hfov0, metadata, config):
         hfov1 = hfov0 + random.gauss(0, hfov_std)
 
         # Important Calculation
-        rgb_height, rgb_width = config['image']['rgb_size']  # [width, height]
+        rgb_height, rgb_width = config['image']['rgb_size']  # [height, width]
         ir_height, ir_width = config['image']['ir_size']
         Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
         HFOV = hfov1  # Horizontal field of view (degrees)

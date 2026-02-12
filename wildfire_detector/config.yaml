@@ -52,7 +52,7 @@ dbscan:
   min_samples_factor: 1        # Ratio to determine min_samples of fire pixels in the search radius to be recognized as cluster (min_samples_factor = 1 -> the ratio is 1/pi~1/3)
   eps_distance_factor: 0.25      # Factor to scale DBSCAN radius (eps) - min_samples = eps^2 -> eps = (L_fire_in_pixels/2)*eps_distance_factor
   diff_threshold: 50           # Minimum difference between frames to consider a pixel as active
-  min_contrast: 10              # Minimum contrast for selecting cluster centers
+  min_contrast: 2              # Z score (in std terms) for Minimum contrast for selecting cluster centers - sigma
 
 # ---------------------------------------------------
 # Cluster Scoring

@@ -13,20 +13,22 @@ def create_homography(pts_dst, pts_src):
 
 
 def preprocess_images(image1, image2, applying=False):
-    img1 = image1.astype(np.uint8)
-    img2 = image2.astype(np.uint8)
+    img1 = image1.astype(np.float32)
+    img2 = image2.astype(np.float32)
 
     if applying:
         img1 = img1 - img1.mean()
+        img1 = np.maximum(img1, 0)
+
         img2 = img2 - img2.mean()
+        img2 = np.maximum(img2, 0)
 
     return img1, img2
 
 
 def compute_positive_difference(img1, img2):
     diff = img2 - img1
-    # diff[np.isnan(diff)] = 0
-    diff[img2 < img1] = 0
+    diff = np.maximum(diff, 0)
     return diff
 
 
@@ -47,7 +49,7 @@ def postprocess_difference_map(diff, img2, threshold=None, temp_threshold=None):
         diff[diff <= threshold] = 0
 
     if temp_threshold is not None:
-        temp_mask = img2 <= (img2.median() + temp_threshold)
+        temp_mask = img2 <= (np.median(img2) + temp_threshold)
         diff[temp_mask] = 0
 
     return diff
@@ -69,8 +71,8 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
 
     Returns:
         centers: list of (i, j) tuples (float)
-        bboxes: list of (min_i, min_j, max_i, max_j)
         label_map: 2D array same shape as diff_map with cluster labels
+        bboxes: list of (min_i, min_j, max_i, max_j)
     """
     active_pixels = np.argwhere(diff_map > threshold)
     if len(active_pixels) == 0:
@@ -94,12 +96,17 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
         values = diff_map[cluster_points[:, 0], cluster_points[:, 1]]
 
         # Determine center
-        contrast = values.max() - 2 * values.mean()
-        if contrast >= min_contrast:
+        z = (values.max() - values.mean()) / (values.std() + 1e-6)
+        if z >= min_contrast:
             hottest_idx = np.argmax(values)
             center = cluster_points[hottest_idx]
         else:
-            center = cluster_points.mean(axis=0)
+            # Compute weights: normalize to avoid extremely large differences
+            weights = values - values.min() + 1e-6  # ensure positive
+            weights /= weights.sum()  # normalize to sum=1
+
+            # Compute weighted center
+            center = np.average(cluster_points, axis=0, weights=weights)
 
         centers.append(tuple(center))
 

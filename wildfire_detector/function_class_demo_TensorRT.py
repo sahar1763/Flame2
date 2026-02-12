@@ -147,6 +147,11 @@ class ScanManager:
             sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
             sensor_elevation_deg=metadata["payload"]["elevation_deg"],
         )  # angle regarding to world
+
+        # IF camera is almost horizontal
+        if projection_angle > 89:
+            return []
+
         hfov = metadata["payload"]["field_of_view_deg"] # [deg]
 
         # Load scan0 image and corners
