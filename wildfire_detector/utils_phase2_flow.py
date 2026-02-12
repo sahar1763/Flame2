@@ -21,7 +21,7 @@ def crop_bbox_scaled(image, bbox, crop_factor, min_cropsize=None):
         np.ndarray: Cropped RGB image
     """
     H, W = image.shape[:2]
-    c_min, r_min, c_max, r_max = bbox
+    r_min, c_min, r_max, c_max = bbox
 
     # --- pixel geometry ---
     bbox_height = r_max - r_min
@@ -199,6 +199,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
 
     # Optional plot
     if plot and original_image is not None and crops_np is not None:
+        y_min, x_min, y_max, x_max = bbox
         plot_crops_with_predictions(
             original_image,
             crops_np,
@@ -206,7 +207,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
             confidence_scores,
             final_label,
             avg_conf,
-            bbox=bbox
+            bbox=(x_min, y_min, x_max, y_max)
         )
 
     return final_class, avg_conf
@@ -279,6 +280,7 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
 
     # Optional plot
     if plot and original_image is not None and crops_np is not None:
+        y_min, x_min, y_max, x_max = bbox
         plot_crops_with_predictions(
             original_image,
             crops_np,
@@ -286,7 +288,7 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
             confs.tolist(),
             final_label,
             avg_conf,
-            bbox=bbox
+            bbox=(x_min, y_min, x_max, y_max)
         )
 
     return final_class, avg_conf

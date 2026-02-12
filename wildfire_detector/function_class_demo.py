@@ -316,7 +316,7 @@ class ScanManager:
         y_max = int(np.ceil(np.max(bbox_pixels_array[:, 0])))
 
         # Original (unfixed) bbox
-        bbox_pixels_raw = (x_min, y_min, x_max, y_max)
+        bbox_pixels_raw = (y_min, x_min, y_max, x_max)
 
         valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
 
@@ -373,7 +373,7 @@ class ScanManager:
 
     def _valid_phase2(self, bbox_pixels_raw, rgb_height, rgb_width):
 
-        x_min, y_min, x_max, y_max = bbox_pixels_raw
+        y_min, x_min, y_max, x_max = bbox_pixels_raw
         # ------------------------------------------------------------
         # === Determine bbox relation to image
         # ------------------------------------------------------------
@@ -402,17 +402,17 @@ class ScanManager:
         elif fully_outside:
             # Case 0: bbox fully outside → take full image
             valid_scan = 0
-            bbox_pixels = (0, 0, (rgb_width - 1), (rgb_height - 1))
+            bbox_pixels = (0, 0, (rgb_height - 1), (rgb_width - 1))
 
         else:
             # Case 1: bbox partially inside → clip
             valid_scan = 1
 
             bbox_pixels = (
-                max(0, x_min),
                 max(0, y_min),
-                min((rgb_width - 1), x_max),
-                min((rgb_height - 1), y_max)
+                max(0, x_min),
+                min((rgb_height - 1), y_max),
+                min((rgb_width - 1), x_max)
             )
         return valid_scan, bbox_pixels
 
