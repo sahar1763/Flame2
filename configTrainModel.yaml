@@ -1,0 +1,21 @@
+dataset:
+  images_dir: "Datasets_FromDvir/Datasets/rgb_images"
+  labels_csv: "Datasets_FromDvir/Datasets/rgb_images/labels.csv"
+  image_size: 254
+
+training:
+  model_name: "resnet18"
+  lr: 0.0001
+  weight_decay: 0.0001
+  batch_size: 5
+  num_epochs: 5
+  early_stopping: 10
+  print_every: 1
+  max_batches_per_epoch: 100
+
+wandb:
+  entity: "WildFire_Detector"
+  project: "Phase2_ResNet18"
+
+checkpoints:
+  path: "resnet_fire_classifier"
