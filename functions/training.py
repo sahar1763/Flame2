@@ -102,12 +102,14 @@ class Trainer:
             # Early Stopping Check
             if best_acc is None or val_result["accuracy"] > best_acc:
                 best_acc = val_result["accuracy"]
+                checkpoint_test_acc = test_result["accuracy"]
                 epochs_without_improvement = 0
                 if checkpoint_path:
                     torch.save({
                         "model_state": self.model.state_dict(),
                         "optimizer_state": self.optimizer.state_dict(),  # כדאי להוסיף
                         "best_acc": best_acc,
+                        "checkpoint_test_acc": checkpoint_test_acc,
                         "ewi": epochs_without_improvement
                     }, checkpoint_path)
                     
