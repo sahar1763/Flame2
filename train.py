@@ -108,7 +108,8 @@ def main(config_path: str):
         image_size=image_size,
         images_dir=images_dir,
         labels_csv_path=labels_csv_path,
-        batch_size=batch_size
+        batch_size=batch_size,
+        config=config
     )
 
     logging.info(f"Number of classes: {num_classes}")

@@ -38,7 +38,7 @@ class FireSmokeDatasetFromLists(Dataset):
             return image, label, image_path
         except Exception as e:
             print(f"Error loading index {idx}: {e}")
-            return torch.zeros(3, 254, 254), 0, "error"
+            return torch.zeros(3, 254, 254), 0, "error" # TODO
 
 
 def load_image_label_data(images_dir, labels_excel_path):
@@ -80,7 +80,7 @@ def load_image_label_data(images_dir, labels_excel_path):
 
 
 
-def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size):
+def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, config):
     # Set random seed for reproducibility
     random_seed = 42
     torch.manual_seed(random_seed)
@@ -128,14 +128,25 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size):
     test_dataset = FireSmokeDatasetFromLists(test_paths, test_labels, transform=test_transform)
 
     # Create loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
-                              pin_memory=True, prefetch_factor=4, num_workers=12, persistent_workers=True)
-
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            pin_memory=True, prefetch_factor=4, num_workers=12, persistent_workers=True)
-
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
-                             pin_memory=True, prefetch_factor=4, num_workers=12, persistent_workers=True)
+    dataloader_params = config.get("dataloader", {})
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        **dataloader_params
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        **dataloader_params
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        **dataloader_params
+    )
 
     # Optional print
     print(f"Train size: {len(train_dataset)}")
