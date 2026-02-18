@@ -1,0 +1,4 @@
+python train.py
+python train.py --config config.yaml
+Linux: python train.py --config /home/user/project/configs/exp1.yaml
+Windows: python train.py --config C:\Users\user\project\configs\exp1.yaml
