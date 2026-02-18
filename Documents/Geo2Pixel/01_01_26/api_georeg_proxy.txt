@@ -1,0 +1,450 @@
+openapi: 3.0.3
+info:
+  title: GeoReg Proxy API
+  description: |
+    API for converting between pixel and geographic coordinates using the GeoReg wrapper service.
+    
+    **Key Features:**
+    - Bidirectional conversion: Pixel ↔ Geographic coordinates
+    - Multi-target support: Convert multiple points in a single request
+    - Dynamic key names: Use custom identifiers (e.g., 'vehicle1', 'target1', 'person1')
+    - Dual coordinate systems: Returns both WGS84 and UTM coordinates for pixel-to-geo conversions
+  version: 1.0.0
+
+tags:
+  - name: coordinate-conversion
+    description: Geographic coordinate conversion operations
+
+paths:
+  /pixel_to_geo:
+    post:
+      tags:
+        - coordinate-conversion
+      summary: Convert pixel coordinates to geographic coordinates
+      description: |
+        Converts pixel coordinates from image/video frames to geographic coordinates using a transformation matrix.
+        
+        Supports converting **multiple targets** in a single request by providing a dictionary with custom key names (e.g., 'target1', 'vehicle1', 'person1').
+        
+        **Response includes:**
+        - Original key names with WGS84 coordinates (x=longitude, y=latitude, z=altitude)
+        - '{key}_utm' variants with UTM coordinates
+      operationId: convertPixelToGeo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PixelToGeoRequestMessageBody'
+            examples:
+              pixel_conversion_single:
+                summary: Convert single pixel to geographic coordinates
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    pixels:
+                      target1:
+                        x: 640.0
+                        y: 480.0
+              pixel_conversion_multiple:
+                summary: Convert multiple pixels to geographic coordinates
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    pixels:
+                      vehicle1:
+                        x: 640.0
+                        y: 480.0
+                      vehicle2:
+                        x: 800.0
+                        y: 600.0
+                      person1:
+                        x: 320.0
+                        y: 240.0
+      responses:
+        '200':
+          description: Successful coordinate conversion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PixelToGeoResponseMessageBody'
+              examples:
+                success_response_single:
+                  summary: Successful conversion response (single target)
+                  value:
+                    data:
+                      res:
+                        coords:
+                          target1:
+                            x: -122.4194
+                            y: 37.7749
+                            z: 100.0
+                          target1_utm:
+                            x: 551316.0
+                            y: 4182692.0
+                            z: 100.0
+                      "time stamp": 1703123456789
+                success_response_multiple:
+                  summary: Successful conversion response (multiple targets)
+                  value:
+                    data:
+                      res:
+                        coords:
+                          vehicle1:
+                            x: -122.4194
+                            y: 37.7749
+                            z: 100.0
+                          vehicle1_utm:
+                            x: 551316.0
+                            y: 4182692.0
+                            z: 100.0
+                          vehicle2:
+                            x: -122.4180
+                            y: 37.7735
+                            z: 95.0
+                          vehicle2_utm:
+                            x: 551320.0
+                            y: 4182685.0
+                            z: 95.0
+                      "time stamp": 1703123456789
+        '400':
+          description: Bad request - Invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error - Conversion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable - GeoReg wrapper not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /geo_to_pixel:
+    post:
+      tags:
+        - coordinate-conversion
+      summary: Convert geographic coordinates to pixel coordinates
+      description: |
+        Converts geographic coordinates to pixel coordinates using a transformation matrix.
+        
+        Supports converting **multiple locations** in a single request by providing a dictionary with custom key names (e.g., 'location1', 'target1', 'point1').
+        
+        **Input coordinates:** x=longitude, y=latitude, z=altitude
+        **Output pixels:** Preserves input key names in the response
+      operationId: convertGeoToPixel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeoToPixelRequestMessageBody'
+            examples:
+              geo_conversion_single:
+                summary: Convert single geographic coordinate to pixel
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    coords:
+                      target1:
+                        x: -122.4194
+                        y: 37.7749
+                        z: 100.0
+              geo_conversion_multiple:
+                summary: Convert multiple geographic coordinates to pixels
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    coords:
+                      location1:
+                        x: -122.4194
+                        y: 37.7749
+                        z: 100.0
+                      location2:
+                        x: -122.4180
+                        y: 37.7735
+                        z: 95.0
+      responses:
+        '200':
+          description: Successful coordinate conversion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoToPixelResponseMessageBody'
+              examples:
+                success_response_single:
+                  summary: Successful conversion response (single target)
+                  value:
+                    data:
+                      res:
+                        pixels:
+                          target1:
+                            x: 640.0
+                            y: 480.0
+                      "time stamp": 1703123456789
+                success_response_multiple:
+                  summary: Successful conversion response (multiple targets)
+                  value:
+                    data:
+                      res:
+                        pixels:
+                          location1:
+                            x: 640.0
+                            y: 480.0
+                          location2:
+                            x: 800.0
+                            y: 600.0
+                      "time stamp": 1703123456789
+        '400':
+          description: Bad request - Invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error - Conversion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable - GeoReg wrapper not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    PixelToGeoRequestMessageBody:
+      type: object
+      required:
+        - server_id
+        - body
+      properties:
+        server_id:
+          type: integer
+          title: Server ID
+          description: Server identifier
+        body:
+          type: object
+          required:
+            - transf
+            - pixels
+          properties:
+            transf:
+              type: array
+              items:
+                type: number
+              minItems: 16
+              maxItems: 16
+              title: Transf
+              description: Transformation matrix as a flat array of 16 float64 elements
+            pixels:
+              type: object
+              additionalProperties:
+                type: object
+                required:
+                  - x
+                  - y
+                properties:
+                  x:
+                    type: number
+                    title: X Coordinate
+                    description: X coordinate value
+                  y:
+                    type: number
+                    title: Y Coordinate
+                    description: Y coordinate value
+                title: Pixel Coordinate
+                description: Pixel coordinate object with x, y values
+              title: Pixels
+              description: Pixel coordinates as a dictionary with any key names containing x, y values (e.g., 'target1', 'vehicle1')
+          title: Body
+          description: Request body containing transformation matrix and pixels data
+      title: PixelToGeoRequestMessageBody
+      description: |
+        Request message body containing transformation matrix and pixels data to send to geo registration service.
+        
+        **Note:** The 'pixels' dictionary accepts any key names. Use meaningful identifiers like 'target1', 'vehicle1', etc.
+        The same key names will be used in the response (with '_utm' suffix added for UTM coordinates).
+
+    PixelToGeoResponseMessageBody:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          required:
+            - res
+            - time stamp
+          properties:
+            res:
+              type: object
+              required:
+                - coords
+              properties:
+                coords:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    required:
+                      - x
+                      - y
+                      - z
+                    properties:
+                      x:
+                        type: number
+                        title: X Coordinate
+                        description: X coordinate value (longitude for WGS84, easting for UTM)
+                      y:
+                        type: number
+                        title: Y Coordinate
+                        description: Y coordinate value (latitude for WGS84, northing for UTM)
+                      z:
+                        type: number
+                        title: Z Coordinate
+                        description: Z coordinate value (altitude/elevation)
+                    title: Geographic Coordinate
+                    description: Geographic coordinate object with x, y, z values
+                  title: Coordinates
+                  description: "Transformed coordinates with dynamic keys preserving input key names. For each input key (e.g., 'target1'), returns two keys: the original (WGS84 coords) and '{key}_utm' (UTM coords)"
+              title: Response Data
+              description: Object containing coordinate transformation results
+            time stamp:
+              type: number
+              title: Time Stamp
+              description: Timestamp of the geo registration response
+          title: Data
+          description: Response data containing transformation results and timestamp
+      title: PixelToGeoResponseMessageBody
+      description: Response message body containing geo coordinates retrieved from geo registration service
+
+    GeoToPixelRequestMessageBody:
+      type: object
+      required:
+        - server_id
+        - body
+      properties:
+        server_id:
+          type: integer
+          title: Server ID
+          description: Server identifier
+        body:
+          type: object
+          required:
+            - transf
+            - coords
+          properties:
+            transf:
+              type: array
+              items:
+                type: number
+              minItems: 16
+              maxItems: 16
+              title: Transf
+              description: Transformation matrix as a flat array of 16 float64 elements
+            coords:
+              type: object
+              additionalProperties:
+                type: object
+                required:
+                  - x
+                  - y
+                  - z
+                properties:
+                  x:
+                    type: number
+                    title: X Coordinate
+                    description: X coordinate value (longitude)
+                  y:
+                    type: number
+                    title: Y Coordinate
+                    description: Y coordinate value (latitude)
+                  z:
+                    type: number
+                    title: Z Coordinate
+                    description: Z coordinate value (altitude)
+                title: Geographic Coordinate
+                description: Geographic coordinate object with x, y, z values
+              title: Coords
+              description: Geographic coordinates as a dictionary with any key names containing x, y, z values (e.g., 'location1', 'target1')
+          title: Body
+          description: Request body containing transformation matrix and coordinates data
+      title: GeoToPixelRequestMessageBody
+      description: |
+        Request message body containing transformation matrix and coordinates data to send to geo to pixel service.
+        
+        **Note:** The 'coords' dictionary accepts any key names. Use meaningful identifiers like 'location1', 'target1', etc.
+        The same key names will be preserved in the response pixels dictionary.
+
+    GeoToPixelResponseMessageBody:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          required:
+            - res
+            - time stamp
+          properties:
+            res:
+              type: object
+              required:
+                - pixels
+              properties:
+                pixels:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    required:
+                      - x
+                      - y
+                    properties:
+                      x:
+                        type: number
+                        title: X Coordinate
+                        description: Pixel X coordinate value
+                      y:
+                        type: number
+                        title: Y Coordinate
+                        description: Pixel Y coordinate value
+                    title: Pixel Coordinate
+                    description: Pixel coordinate object with x, y values
+                  title: Pixels
+                  description: Converted pixel coordinates with dynamic keys matching input key names (e.g., 'location1', 'target1')
+              title: Response Data
+              description: Object containing pixel coordinate conversion results
+            time stamp:
+              type: number
+              title: Time Stamp
+              description: Timestamp of the geo to pixel conversion response
+          title: Data
+          description: Response data containing conversion results and timestamp
+      title: GeoToPixelResponseMessageBody
+      description: Response message body containing pixel coordinates converted from geographic coordinates
+
+    ErrorResponse:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+          description: Error message describing what went wrong
+          example: "Invalid pixel format at index 0. Expected [x, y]"
+      description: Error response with detailed error message
+
+ 

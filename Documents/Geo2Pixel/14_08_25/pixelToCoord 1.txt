@@ -1,0 +1,237 @@
+const math = require('mathjs');
+function computeHorizonLoss(startEasting, startNorthing, endEasting, endNorthing)
+{
+    const sqr = (x) => x * x;
+    const distSqr = sqr(startEasting - endEasting) + sqr(startNorthing - endNorthing);
+
+    const R = 6378137; // Earth's radius in meters
+    const invR = 1.0 / R;
+
+    const sinAlpha = Math.sqrt(distSqr) * invR;
+    const cosAlpha = Math.sqrt(1 - sqr(sinAlpha));
+    const h = R * (1 - cosAlpha);
+
+    return h;
+}
+function calcLOSFromTransf(WorldToImageTransf, pixel)
+{
+    //example:
+    //pixel[0] = 0; pixel[1] = 0;  //center
+    //WorldToImageTransf = [1906106.1434734706, 94.08734757090947, -4576.944908772393, -4572.36796386362, 110411.54639316132, -8433.657877972284, 111298.1957964138, 111186.89760061736, 0.0015138570858841663, 36.170928308688204, 0.002095475502706465, 0.002093380027203758, -71504424.65599799, 270929.1593990332, -3465697.7251563785, -3462212.027431221];
+
+    // let matrix = ConvertWorldTransofFromToMatrixMetrics(WorldToImageTransf);
+    const matrix = math.reshape(WorldToImageTransf, [4, 4]);
+
+
+    const transfmatrix = math.transpose(matrix); //[worldTransf].Transposed
+    // identity matrix that will convert from geo to "meter" like by multipliying in 100,000 
+    let M = math.identity(4, 4);
+    M.set([0, 0], 1 / 100000);
+    M.set([1, 1], 1 / 100000);
+    const result = math.multiply(transfmatrix, M);
+    let matrixArray = result;
+    matrixArray._data[2] = matrixArray._data[3];
+    matrixArray._data[3] = [0, 0, 0, 1];
+    const subset_matrix = math.matrix(matrixArray);
+
+    const transfMatrixInv = math.inv(subset_matrix); //[worldTransf](-1)
+
+    //camera position
+
+    const CamPosVec = math.multiply(transfMatrixInv, [0, 0, 0, 1]).toArray();
+    const cameraPosition = [CamPosVec[0], CamPosVec[1], CamPosVec[2]];
+
+    //pixel position in the world:
+
+    let factor = 1;
+    const pixPosVec = math.multiply(transfMatrixInv, [pixel[0], pixel[1], 1, 1]).toArray();
+    const pixPosition = [pixPosVec[0], pixPosVec[1], pixPosVec[2]];
+
+    //Line of sight is the vector from camera to pixel
+    //(pixel_pos - camera_pos)  in utm
+
+    let camPosUtm = latLonToUtm(cameraPosition[1] / 100000, cameraPosition[0] / 100000);
+    let pixelPosUtm = latLonToUtm(pixPosition[1] / 100000, pixPosition[0] / 100000);
+    let camPositionUtm = [camPosUtm.easting, camPosUtm.northing, CamPosVec[2]];
+    let pixPositionUtm = [pixelPosUtm.easting, pixelPosUtm.northing, pixPosVec[2]];
+
+
+    const LOS = math.subtract(pixPositionUtm, camPositionUtm);
+    const viewDir = LOS;
+    viewDir[1] *= -1;
+    // Compute the magnitude (Euclidean norm)
+    const magnitude = math.norm(viewDir);
+
+    // Normalize the vector
+    const normalizedViewDir = viewDir.map(component => component / magnitude);
+
+    //compute heading and pitch from LOS wich is attchually view dir
+    let azim = math.atan2(viewDir[0], viewDir[1]);
+    let elev = math.atan2(viewDir[2], math.sqrt(math.pow(viewDir[0], 2) + math.pow(viewDir[1], 2)));
+
+    const azim_degree = math.unit(azim, 'rad').toNumber('deg');
+    const elv_degree = math.unit(elev, 'rad').toNumber('deg');
+    console.log("azim:" + azim_degree + "elv:" + elv_degree);
+
+
+    //shoot the ray:
+    //we use the normalized vec_dir start from camera position and shoot the ray until we hit the ground
+    let stop = false;
+    let ray_pos_utm = [...camPositionUtm]; // make a copy_$!stop)
+    {
+        // Move along the normalized direction vector
+        ray_pos_utm = math.add(ray_pos_utm, normalizedViewDir);
+        let h_loss = computeHorizonLoss(camPositionUtm[0], camPositionUtm[1], ray_pos_utm[0], ray_pos_utm[1]);
+        ray_pos_compute = ray_pos_utm;
+        z = 0;// modules_ptr -> dtm.GetZ({ ray_pos_compute.x, ray_pos_compute.y, modules_ptr-> ortho.GetMapData().utm_epsg }, true);_$ray_pos_utm[2] > (z - h_loss))
+            continue;
+        else
+            stop = true;
+
+    }
+    //result in utm is:
+    //ray_pos_utm[0] → UTM Easting
+    //ray_pos_utm[1] → UTM Northing
+    //ray_pos_utm[2] → Altitude (Z)
+
+    geo_position_on_ground = utmToLatLon(ray_pos_utm[0], ray_pos_utm[1], camPosUtm.zoneNumber, camPosUtm.hemisphere == 'N');// camPosUtm.zoneNumberisNorthern(camPosUtm.zoneLetter))
+
+    return geo_position_on_ground;
+
+}
+
+function latLonToUtm(lat, lon)
+{
+    // WGS-84 ellipsoid constants
+    const a = 6378137.0;
+    const f = 1 / 298.257223563;
+    const k0 = 0.9996;
+    const e = Math.sqrt(f * (2 - f));
+    const eSq = e * e;
+    const ePrimeSq = eSq / (1 - eSq);
+
+    // 1. Determine UTM zone
+    const zoneNumber = Math.floor((lon + 180) / 6) + 1;
+    const lonOrigin = (zoneNumber - 1) * 6 - 180 + 3;
+
+    // 2. Convert to radians
+    const latRad = lat * Math.PI / 180;
+    const lonRad = lon * Math.PI / 180;
+    const lonOriginRad = lonOrigin * Math.PI / 180;
+
+    // 3. Precompute terms
+    const sinLat = Math.sin(latRad);
+    const cosLat = Math.cos(latRad);
+    const tanLat = Math.tan(latRad);
+
+    const N = a / Math.sqrt(1 - eSq * sinLat * sinLat);
+    const T = tanLat * tanLat;
+    const C = ePrimeSq * cosLat * cosLat;
+    const A = cosLat * (lonRad - lonOriginRad);
+
+    // 4. Meridional arc
+    const M = a * (
+        (1 - eSq / 4 - 3 * eSq * eSq / 64 - 5 * eSq * eSq * eSq / 256) * latRad
+        - (3 * eSq / 8 + 3 * eSq * eSq / 32 + 45 * eSq * eSq * eSq / 1024) * Math.sin(2 * latRad)
+        + (15 * eSq * eSq / 256 + 45 * eSq * eSq * eSq / 1024) * Math.sin(4 * latRad)
+        - (35 * eSq * eSq * eSq / 3072) * Math.sin(6 * latRad)
+    );
+
+    // 5. Easting
+    const easting = k0 * N * (
+        A
+        + (1 - T + C) * A * A * A / 6
+        + (5 - 18 * T + T * T + 72 * C - 58 * ePrimeSq) * A * A * A * A * A / 120
+    ) + 500000;
+
+    // 6. Northing
+    let northing = k0 * (
+        M
+        + N * tanLat * (
+            A * A / 2
+            + (5 - T + 9 * C + 4 * C * C) * A * A * A * A / 24
+            + (61 - 58 * T + T * T + 600 * C - 330 * ePrimeSq) * A * A * A * A * A * A / 720
+        )
+    );_$lat < 0) northing += 10_000_000;
+
+    // 7. Latitude band and hemisphere
+    const bands = "CDEFGHJKLMNPQRSTUVWX"; // 8° bands
+    const bandIndex = Math.floor((lat + 80) / 8);
+    const zoneLetter = bands[Math.max(0, Math.min(bands.length - 1, bandIndex))];
+    const hemisphere = lat >= 0 ? "N" : "S";
+
+    return { easting, northing, zoneNumber, zoneLetter, hemisphere };
+}
+
+
+function utmToLatLon(easting, northing, zoneNumber, isNorthernHemisphere = true)
+{
+    // WGS-84 ellipsoid constants
+    const a = 6378137.0; // semi-major axis
+    const f = 1 / 298.257223563;
+    const k0 = 0.9996;
+    const e = Math.sqrt(f * (2 - f));
+    const eSq = e * e;
+    const ePrimeSq = eSq / (1 - eSq);
+
+    // Remove false easting
+    const x = easting - 500000.0;
+
+    // Remove 10,000,000 meter offset used for southern hemisphere
+    let y = northing;_$!isNorthernHemisphere)
+    {
+        y -= 10000000.0;
+    }
+
+    // Central meridian of this UTM zone
+    const lonOrigin = (zoneNumber - 1) * 6 - 180 + 3;
+
+    // Calculate the meridional arc
+    const M = y / k0;
+    const mu = M / (a * (1 - eSq / 4 - 3 * eSq * eSq / 64 - 5 * eSq * eSq * eSq / 256));
+
+    // Calculate footprint latitude
+    const e1 = (1 - Math.sqrt(1 - eSq)) / (1 + Math.sqrt(1 - eSq));
+    const J1 = (3 * e1 / 2 - 27 * e1 * e1 * e1 / 32);
+    const J2 = (21 * e1 * e1 / 16 - 55 * e1 * e1 * e1 * e1 / 32);
+    const J3 = (151 * e1 * e1 * e1 / 96);
+    const J4 = (1097 * e1 * e1 * e1 * e1 / 512);
+    const fp = mu + J1 * Math.sin(2 * mu) + J2 * Math.sin(4 * mu) + J3 * Math.sin(6 * mu) + J4 * Math.sin(8 * mu);
+
+    // Precompute terms
+    const sinFp = Math.sin(fp);
+    const cosFp = Math.cos(fp);
+    const tanFp = Math.tan(fp);
+
+    const C1 = ePrimeSq * cosFp * cosFp;
+    const T1 = tanFp * tanFp;
+    const N1 = a / Math.sqrt(1 - eSq * sinFp * sinFp);
+    const R1 = N1 * (1 - eSq) / (1 - eSq * sinFp * sinFp);
+    const D = x / (N1 * k0);
+
+    // Calculate latitude
+    let lat = fp - (N1 * tanFp / R1) * (
+        D * D / 2 -
+        (5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ePrimeSq) * Math.pow(D, 4) / 24 +
+        (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ePrimeSq - 3 * C1 * C1) * Math.pow(D, 6) / 720
+    );
+    lat = lat * 180 / Math.PI;
+
+    // Calculate longitude
+    let lon = (D -
+        (1 + 2 * T1 + C1) * Math.pow(D, 3) / 6 +
+        (5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ePrimeSq + 24 * T1 * T1) * Math.pow(D, 5) / 120
+    ) / cosFp;
+    lon = lonOrigin + lon * 180 / Math.PI;
+
+    return { lat, lon };
+}
+
+const WorldToImageTransf = [
+    177264.68302035995, -39218.835200422924, -713.2399011200629, -712.5266612189428,
+    35859.43077471734, 268621.8023220286, 6555.480111260919, 6548.924631149658,
+    0.004824297946454393, 0.14534412040178382, -0.9992387967489064, -0.9982395579521574,
+    -7220451.917053804, -7031728.055003639, -179300.01082196983, -179100.71081114787
+];
+let res = calcLOSFromTransf(WorldToImageTransf, [0.5, 0.5]);
+console.log(res);

@@ -1,0 +1,389 @@
+openapi: 3.0.3
+info:
+  title: GeoReg Proxy API
+  description: API for converting pixel coordinates to geographic coordinates using the GeoReg wrapper service.
+  version: 1.0.0
+
+tags:
+  - name: coordinate-conversion
+    description: Geographic coordinate conversion operations
+
+paths:
+  /pixel_to_geo:
+    post:
+      tags:
+        - coordinate-conversion
+      summary: Convert pixel coordinates to geographic coordinates
+      description: Converts pixel coordinates from image/video frames to geographic coordinates using a transformation matrix.
+      operationId: convertPixelToGeo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PixelToGeoRequestMessageBody'
+            examples:
+              pixel_conversion:
+                summary: Convert pixel to geographic coordinates
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    pixels:
+                      ptc:
+                        x: 640.0
+                        y: 480.0
+      responses:
+        '200':
+          description: Successful coordinate conversion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PixelToGeoResponseMessageBody'
+              examples:
+                success_response:
+                  summary: Successful conversion response
+                  value:
+                    data:
+                      res:
+                        coords:
+                          ptc:
+                            x: -122.4194
+                            y: 37.7749
+                            z: 100.0
+                          ptc_utm:
+                            x: 551316.0
+                            y: 4182692.0
+                            z: 100.0
+                      "time stamp": 1703123456789
+        '400':
+          description: Bad request - Invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error - Conversion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable - GeoReg wrapper not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /geo_to_pixel:
+    post:
+      tags:
+        - coordinate-conversion
+      summary: Convert geographic coordinates to pixel coordinates
+      description: Converts geographic coordinates to pixel coordinates using a transformation matrix.
+      operationId: convertGeoToPixel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeoToPixelRequestMessageBody'
+            examples:
+              geo_conversion:
+                summary: Convert geographic to pixel coordinates
+                value:
+                  server_id: 1
+                  body:
+                    transf: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    coords:
+                      ptc:
+                        x: -122.4194
+                        y: 37.7749
+                        z: 100.0
+      responses:
+        '200':
+          description: Successful coordinate conversion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeoToPixelResponseMessageBody'
+              examples:
+                success_response:
+                  summary: Successful conversion response
+                  value:
+                    data:
+                      res:
+                        pixels:
+                          ptc:
+                            x: 640.0
+                            y: 480.0
+                      "time stamp": 1703123456789
+        '400':
+          description: Bad request - Invalid input parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error - Conversion failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service unavailable - GeoReg wrapper not initialized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    PixelToGeoRequestMessageBody:
+      type: object
+      required:
+        - server_id
+        - body
+      properties:
+        server_id:
+          type: integer
+          title: Server ID
+          description: Server identifier
+        body:
+          type: object
+          required:
+            - transf
+            - pixels
+          properties:
+            transf:
+              type: array
+              items:
+                type: number
+              minItems: 16
+              maxItems: 16
+              title: Transf
+              description: Transformation matrix as a flat array of 16 float64 elements
+            pixels:
+              type: object
+              required:
+                - ptc
+              properties:
+                ptc:
+                  type: object
+                  required:
+                    - x
+                    - y
+                  properties:
+                    x:
+                      type: number
+                      title: X Coordinate
+                      description: X coordinate value
+                    y:
+                      type: number
+                      title: Y Coordinate
+                      description: Y coordinate value
+                  title: PTC
+                  description: Point coordinates object
+              title: Pixels
+              description: Pixel coordinates as an object with ptc containing x, y values
+          title: Body
+          description: Request body containing transformation matrix and pixels data
+      title: PixelToGeoRequestMessageBody
+      description: Request message body containing transformation matrix and pixels data to send to geo registration service
+
+    PixelToGeoResponseMessageBody:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          required:
+            - res
+            - time stamp
+          properties:
+            res:
+              type: object
+              required:
+                - coords
+              properties:
+                coords:
+                  type: object
+                  required:
+                    - ptc
+                    - ptc_utm
+                  properties:
+                    ptc:
+                      type: object
+                      required:
+                        - x
+                        - y
+                        - z
+                      properties:
+                        x:
+                          type: number
+                          title: X Coordinate
+                          description: X coordinate value
+                        y:
+                          type: number
+                          title: Y Coordinate
+                          description: Y coordinate value
+                        z:
+                          type: number
+                          title: Z Coordinate
+                          description: Z coordinate value
+                      title: PTC
+                      description: Point coordinates in geographic system
+                    ptc_utm:
+                      type: object
+                      required:
+                        - x
+                        - y
+                        - z
+                      properties:
+                        x:
+                          type: number
+                          title: UTM X Coordinate
+                          description: UTM X coordinate value
+                        y:
+                          type: number
+                          title: UTM Y Coordinate
+                          description: UTM Y coordinate value
+                        z:
+                          type: number
+                          title: UTM Z Coordinate
+                          description: UTM Z coordinate value
+                      title: PTC UTM
+                      description: Point coordinates in UTM system
+                  title: Coordinates
+                  description: Transformed coordinates in different coordinate systems
+              title: Response Data
+              description: Object containing coordinate transformation results
+            time stamp:
+              type: number
+              title: Time Stamp
+              description: Timestamp of the geo registration response
+          title: Data
+          description: Response data containing transformation results and timestamp
+      title: PixelToGeoResponseMessageBody
+      description: Response message body containing geo coordinates retrieved from geo registration service
+
+    GeoToPixelRequestMessageBody:
+      type: object
+      required:
+        - server_id
+        - body
+      properties:
+        server_id:
+          type: integer
+          title: Server ID
+          description: Server identifier
+        body:
+          type: object
+          required:
+            - transf
+            - coords
+          properties:
+            transf:
+              type: array
+              items:
+                type: number
+              minItems: 16
+              maxItems: 16
+              title: Transf
+              description: Transformation matrix as a flat array of 16 float64 elements
+            coords:
+              type: object
+              required:
+                - ptc
+              properties:
+                ptc:
+                  type: object
+                  required:
+                    - x
+                    - y
+                    - z
+                  properties:
+                    x:
+                      type: number
+                      title: X Coordinate
+                      description: X coordinate value
+                    y:
+                      type: number
+                      title: Y Coordinate
+                      description: Y coordinate value
+                    z:
+                      type: number
+                      title: Z Coordinate
+                      description: Z coordinate value
+                  title: PTC
+                  description: Point coordinates object
+              title: Coords
+              description: Geographic coordinates to be converted to pixel coordinates
+          title: Body
+          description: Request body containing transformation matrix and coordinates data
+      title: GeoToPixelRequestMessageBody
+      description: Request message body containing transformation matrix and coordinates data to send to geo to pixel service
+
+    GeoToPixelResponseMessageBody:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: object
+          required:
+            - res
+            - time stamp
+          properties:
+            res:
+              type: object
+              required:
+                - pixels
+              properties:
+                pixels:
+                  type: object
+                  required:
+                    - ptc
+                  properties:
+                    ptc:
+                      type: object
+                      required:
+                        - x
+                        - y
+                      properties:
+                        x:
+                          type: number
+                          title: X Coordinate
+                          description: Pixel X coordinate value
+                        y:
+                          type: number
+                          title: Y Coordinate
+                          description: Pixel Y coordinate value
+                      title: PTC
+                      description: Pixel coordinates object
+                  title: Pixels
+                  description: Converted pixel coordinates
+              title: Response Data
+              description: Object containing pixel coordinate conversion results
+            time stamp:
+              type: number
+              title: Time Stamp
+              description: Timestamp of the geo to pixel conversion response
+          title: Data
+          description: Response data containing conversion results and timestamp
+      title: GeoToPixelResponseMessageBody
+      description: Response message body containing pixel coordinates converted from geographic coordinates
+
+    ErrorResponse:
+      type: object
+      required:
+        - detail
+      properties:
+        detail:
+          type: string
+          description: Error message describing what went wrong
+          example: "Invalid pixel format at index 0. Expected [x, y]"
+      description: Error response with detailed error message
+
+ 

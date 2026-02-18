@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+geo_doc_example.py
+
+This file documents TWO ways to turn a pixel into geographic coordinates:
+
+1. Manual computation from a 4x4 world→image transform (transf[16]):
+   - Pixel coords first normalized to TL = (-1, -1), BR = (+1, +1).
+   - Uses numpy + pyproj + simple Earth curvature model.
+
+2. Geo-reg server request:
+   - Pixel coords normalized to TL = (0, 0), BR = (1, 1) as expected by GeoReg.
+   - Uses HTTP POST with the same 4x4 transform and normalized pixel.
+
+The math and HTTP payload shape are taken from the detector server code.
+This file is meant as documentation / reference, not a running service.
+"""
+
+import math
+from typing import Iterable, Tuple, List, Dict, Any
+
+import numpy as np
+import httpx
+
+# Optional; required for the manual method:
+from pyproj import CRS, Transformer
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+WGS84_R = 6378137.0  # Earth radius (approx, meters) used for curvature
+
+# ---------------------------------------------------------------------------
+# Normalization helpers
+# ---------------------------------------------------------------------------
+
+def normalize_pixel_minus1_plus1(
+    cx: int, cy: int, width: int, height: int
+) -> Tuple[float, float]:
+    """
+    Map integer pixel center (cx, cy) with image size (width, height) to
+    normalized coordinates where:
+
+        TL corner -> (-1, -1)
+        BR corner -> (+1, +1)
+        center    -> ( 0,  0)
+
+    This is the normalization used by the MANUAL method.
+
+    Note: we use width-1 and height-1, so that integer corner pixels map
+    exactly to ±1.
+    """
+    x_norm = (cx / max(1, (width - 1))) * 2.0 - 1.0
+    y_norm = (cy / max(1, (height - 1))) * 2.0 - 1.0
+    return x_norm, y_norm
+
+
+def normalized_minus1_plus1_to_0_1(
+    x_norm: float, y_norm: float
+) -> Tuple[float, float]:
+    """
+    Convert from [-1, +1] space to [0, 1] space:
+
+        x_01 = 0.5 * (x_norm + 1)
+        y_01 = 0.5 * (y_norm + 1)
+
+    This is what the GeoReg server expects: TL = (0, 0), BR = (1, 1).
+    """
+    return 0.5 * (x_norm + 1.0), 0.5 * (y_norm + 1.0)
+
+# ---------------------------------------------------------------------------
+# Manual method: pixel → lat/lon
+# ---------------------------------------------------------------------------
+
+def _utm_epsg_for(lat_deg: float, lon_deg: float) -> int:
+    """Return an EPSG code for the UTM zone corresponding to (lat, lon)."""
+    zone = int((lon_deg + 180) // 6) + 1
+    north = lat_deg >= 0.0
+    return (32600 if north else 32700) + zone  # 326xx = N, 327xx = S
+
+
+def _horizon_loss_m(e0: float, n0: float, e1: float, n1: float, R: float = WGS84_R) -> float:
+    """
+    Approximate curvature “drop” [m] between (e0, n0) and (e1, n1) on a sphere.
+
+    Used as a crude Earth curvature model: z_ground = -horizon_loss_m(...).
+    """
+    dist = math.hypot(e1 - e0, n1 - n0)
+    x = dist / R
+    return R * (1.0 - math.cos(x))
+
+
+def pixel_to_latlon_manual(
+    world_to_image_transf: Iterable[float],
+    pixel_xy_norm: Tuple[float, float],
+    step_m: float = 1.0,
+    max_steps: int = 2_000_000,
+) -> Tuple[float, float]:
+    """
+    Manual pixel→lat/lon calculation.
+
+    INPUTS:
+      - world_to_image_transf: 16 floats forming the 4x4 transform, as in the
+        'transf' field of SetDataRequest in the detector server.
+      - pixel_xy_norm: (x_norm, y_norm) in [-1, +1], with TL=(-1,-1), BR=(+1,+1).
+
+    STEPS (mirrors detector_server_test.py):
+      1) Build T from transf (reshape 4x4, transpose).
+      2) Scale X,Y by 1e-5 and patch rows (camera model).
+      3) Invert to get image/world transform.
+      4) Convert camera center and pixel to lon·1e5, lat·1e5, z.
+      5) Convert camera and pixel to UTM (easting, northing).
+      6) Construct line-of-sight (LOS) vector, flip Y, normalize.
+      7) March along LOS until we hit “ground” (with curvature).
+      8) Convert final point back to WGS84 lat/lon.
+    """
+    x_px, y_px = pixel_xy_norm
+
+    # 1) Build transform and invert (same math as server)
+    T = np.array(list(world_to_image_transf), dtype=float).reshape(4, 4).T
+    M = np.diag([1.0 / 100000.0, 1.0 / 100000.0, 1.0, 1.0])
+    A = T @ M
+    A[2, :] = A[3, :]
+    A[3, :] = np.array([0, 0, 0, 1], dtype=float)
+    Ainv = np.linalg.inv(A)
+
+    # 2) Camera and pixel in homogeneous coordinates
+    cam_h = Ainv @ np.array([0.0, 0.0, 0.0, 1.0])
+    pix_h = Ainv @ np.array([x_px, y_px, 1.0, 1.0])
+
+    cam_lon_deg, cam_lat_deg, cam_z = cam_h[0] / 1e5, cam_h[1] / 1e5, cam_h[2]
+    pix_lon_deg, pix_lat_deg, pix_z = pix_h[0] / 1e5, pix_h[1] / 1e5, pix_h[2]
+
+    # 3) UTM transforms
+    epsg = _utm_epsg_for(cam_lat_deg, cam_lon_deg)
+    crs_utm = CRS.from_epsg(epsg)
+    tf_fwd = Transformer.from_crs("EPSG:4326", crs_utm, always_xy=True)
+    tf_inv = Transformer.from_crs(crs_utm, "EPSG:4326", always_xy=True)
+
+    cam_e, cam_n = tf_fwd.transform(cam_lon_deg, cam_lat_deg)
+    pix_e, pix_n = tf_fwd.transform(pix_lon_deg, pix_lat_deg)
+
+    cam = np.array([cam_e, cam_n, cam_z], dtype=float)
+    pix = np.array([pix_e, pix_n, pix_z], dtype=float)
+
+    # 4) Line-of-sight vector (note Y flip to match original code)
+    v = pix - cam
+    v[1] *= -1.0
+    nrm = np.linalg.norm(v)
+    if nrm == 0.0:
+        raise ValueError("Zero-length line-of-sight vector.")
+    d = v / nrm
+
+    # 5) March along LOS until we cross “ground”
+    pos = cam.copy()
+    e0, n0 = cam[0], cam[1]
+    for _ in range(max_steps):
+        pos += d * step_m
+        z_ground = -_horizon_loss_m(e0, n0, pos[0], pos[1], WGS84_R)
+        if pos[2] <= z_ground:
+            # Simple overshoot correction: step back half a step
+            pos -= d * (0.5 * step_m)
+            break
+    else:
+        raise RuntimeError("Did not hit ground within max_steps")
+
+    lon_deg, lat_deg = tf_inv.transform(pos[0], pos[1])
+    return float(lat_deg), float(lon_deg)
+
+# ---------------------------------------------------------------------------
+# GeoReg server method: pixel → lat/lon via HTTP
+# ---------------------------------------------------------------------------
+
+def normalize_georeg_endpoint(ep: str | None) -> str:
+    """
+    Normalize a GeoReg endpoint path so it always starts with '/api/'.
+
+    Examples:
+      None or ''        -> '/api/pixel_to_geo'
+      'pixel_to_geo'    -> '/api/pixel_to_geo'
+      '/pixel_to_geo'   -> '/api/pixel_to_geo'
+      '/api/pixel_to_geo' -> '/api/pixel_to_geo'
+    """
+    default = "/api/pixel_to_geo"
+    if not ep:
+        return default
+    ep = ep.strip()
+    if not ep:
+        return default
+    if ep.startswith("/api/"):
+        return ep
+    if ep == "/api":
+        return default
+    if not ep.startswith("/"):
+        ep = "/" + ep
+    return "/api" + ep
+
+
+def georeg_pixel_to_latlon(
+    geo_server_base: str,
+    endpoint: str,
+    transf16: List[float],
+    x_01: float,
+    y_01: float,
+    server_id: int = 1,
+    timeout_s: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Request pixel→geo conversion from the GeoReg server.
+
+    INPUTS:
+      - geo_server_base: e.g. "http://127.0.0.1:9000"
+      - endpoint: usually "/api/pixel_to_geo" (normalized automatically).
+      - transf16: same 16-element transform used in the manual method.
+      - x_01, y_01: pixel coordinates normalized to [0, 1].
+                    TL = (0,0), BR = (1,1).
+      - server_id: GeoReg server id (as in the detector).
+
+    The payload structure mirrors the detector server's query_pixel_to_geo().
+    """
+    ep = normalize_georeg_endpoint(endpoint)
+    url = geo_server_base.rstrip("/") + ep
+
+    payload = {
+        "server_id": int(server_id),
+        "body": {
+            "transf": [float(v) for v in transf16],
+            "pixels": {
+                "ptc": {"x": float(x_01), "y": float(y_01)}
+            },
+        },
+    }
+
+    with httpx.Client(timeout=timeout_s) as client:
+        resp = client.post(url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    # The detector code expects:
+    #   data["data"]["res"]["coords"]["ptc"] => {'x': lon, 'y': lat}
+    return data
+
+# ---------------------------------------------------------------------------
+# Example usage & documentation of normalization differences
+# ---------------------------------------------------------------------------
+
+def example_documentation():
+    """
+    Example that shows the normalization difference & both methods together.
+
+    1. We pick the IMAGE CENTER pixel (cx, cy).
+    2. For the MANUAL method:
+         - Normalize to [-1, +1] using normalize_pixel_minus1_plus1().
+    3. For the GeoReg method:
+         - Convert the same [-1,+1] coords to [0,1] using normalized_minus1_plus1_to_0_1().
+         - Call georeg_pixel_to_latlon() with x_01, y_01.
+    4. Both methods use the SAME 4x4 transf array.
+
+    Replace the dummy transf & server URL with real values for actual use.
+    """
+
+    # Dummy image size:
+    width, height = 1920, 1080
+
+    # Center pixel
+    cx, cy = width // 2, height // 2
+
+    # ---- MANUAL METHOD: pixel → [-1,+1] → lat/lon ----
+    x_norm, y_norm = normalize_pixel_minus1_plus1(cx, cy, width, height)
+
+    # NOTE: transf16 must come from your real metadata (SetDataRequest.transf).
+    # Here we just create an identity-like placeholder for illustration.
+    transf16 = [0.0] * 16
+    transf16[0] = 1.0
+    transf16[5] = 1.0
+    transf16[10] = 1.0
+    transf16[15] = 1.0
+
+    print("Manual method:")
+    print(f"  Center pixel: (cx, cy) = ({cx}, {cy})")
+    print(f"  Normalized [-1,+1]: (x_norm, y_norm) = ({x_norm:.6f}, {y_norm:.6f})")
+
+    # This will only work with a real transform that encodes camera geometry.
+    # With the dummy identity matrix, it will either fail or return nonsense.
+    try:
+        lat_manual, lon_manual = pixel_to_latlon_manual(transf16, (x_norm, y_norm))
+        print(f"  Manual lat/lon: ({lat_manual:.8f}, {lon_manual:.8f})")
+    except Exception as e:
+        print(f"  Manual method failed (as expected with dummy transf): {e}")
+
+    # ---- GEO-REG METHOD: pixel → [0,1] → server ----
+    x_01, y_01 = normalized_minus1_plus1_to_0_1(x_norm, y_norm)
+    print("\nGeoReg method:")
+    print(f"  Normalized [0,1]: (x_01, y_01) = ({x_01:.6f}, {y_01:.6f})")
+
+    # Typical configuration:
+    geo_server_base = "http://127.0.0.1:9000"
+    endpoint = "/api/pixel_to_geo"  # will be normalized anyway
+
+    try:
+        data = georeg_pixel_to_latlon(
+            geo_server_base=geo_server_base,
+            endpoint=endpoint,
+            transf16=transf16,
+            x_01=x_01,
+            y_01=y_01,
+            server_id=1,
+        )
+        coords = (((data or {}).get("data") or {}).get("res") or {}).get("coords") or {}
+        ptc = coords.get("ptc") or {}
+        print(f"  GeoReg response ptc: {ptc}  (expected keys: 'x'=lon, 'y'=lat)")
+    except Exception as e:
+        print(f"  GeoReg method failed (e.g. no server running): {e}")
+
+
+if __name__ == "__main__":
+    # This module is primarily for documentation. Running it will simply
+    # print out the steps and demonstrate the normalization difference.
+    example_documentation()

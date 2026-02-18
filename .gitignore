@@ -101,6 +101,7 @@ dataset_FOR_IAI/c_1/
 *.jpg
 *.json
 *.pt
+*.onnx
 
 # Results
 results/
