@@ -88,9 +88,6 @@ def main(config_path: str):
     weight_decay = config["training"]["weight_decay"]
     batch_size = config["training"]["batch_size"]
     num_epochs = config["training"]["num_epochs"]
-    early_stopping = config["training"]["early_stopping"]
-    print_every = config["training"]["print_every"]
-    max_batches_per_epoch = config["training"]["max_batches_per_epoch"]
 
     # ---------- W&B ----------
     wandb_entity = config["wandb"]["entity"]
@@ -115,10 +112,20 @@ def main(config_path: str):
     logging.info(f"Number of classes: {num_classes}")
 
     # ---------- Initialize Model ----------
-    resnet = models.resnet18(pretrained=True)
-    num_ftrs = resnet.fc.in_features
-    resnet.fc = nn.Linear(num_ftrs, num_classes)
-    resnet = resnet.to(device)
+    model_name = config["training"]["model_name"]
+    model = getattr(models, model_name)(pretrained=True)
+
+    if "resnet" in model_name.lower():
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, num_classes)
+    elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
+        num_ftrs = model.classifier[-1].in_features
+        model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
+    elif "densenet" in model_name.lower():
+        num_ftrs = model.classifier.in_features
+        model.classifier = nn.Linear(num_ftrs, num_classes)
+
+    model = model.to(device)
 
     logging.info(f"Model: {model_name}")
     logging.info(f"Learning rate: {lr}")
@@ -127,11 +134,11 @@ def main(config_path: str):
 
     # ---------- Loss & Optimizer ----------
     loss_fn = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(resnet.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # ---------- Trainer ----------
     trainer = ClassificationGuidedEncoding(
-        resnet,
+        model,
         loss_fn,
         optimizer,
         use_wandb=True,
@@ -146,11 +153,8 @@ def main(config_path: str):
         train_loader,
         val_loader,
         test_loader,
-        num_epochs=num_epochs,
+        config=config,
         checkpoints=checkpoint_path,
-        early_stopping=early_stopping,
-        print_every=print_every,
-        max_batches_per_epoch=max_batches_per_epoch
     )
 
     logging.info("Training completed successfully.")

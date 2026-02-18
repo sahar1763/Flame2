@@ -1,7 +1,16 @@
 dataset:
   images_dir: "Datasets_FromDvir/Datasets/rgb_images"
   labels_csv: "Datasets_FromDvir/Datasets/rgb_images/labels.csv"
-  image_size: 254
+  image_size: 224
+  val_ratio: 0.4
+  test_only:
+    - Test
+
+#dataloader:
+#  pin_memory: true
+#  prefetch_factor: 4
+#  num_workers: 12
+#  persistent_workers: true
 
 training:
   model_name: "resnet18"
@@ -12,10 +21,12 @@ training:
   early_stopping: 10
   print_every: 1
   max_batches_per_epoch: 100
+  update_lr_epoch_num: 3
+  lr_factor: 0.5
 
 wandb:
   entity: "WildFire_Detector"
   project: "Phase2_ResNet18"
 
 checkpoints:
-  path: "resnet_fire_classifier"
+  path: "fire_classifier"

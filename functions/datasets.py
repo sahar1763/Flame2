@@ -38,7 +38,7 @@ class FireSmokeDatasetFromLists(Dataset):
             return image, label, image_path
         except Exception as e:
             print(f"Error loading index {idx}: {e}")
-            return torch.zeros(3, 254, 254), 0, "error" # TODO
+            return torch.zeros(3, 224, 224), 0, "error" # TODO
 
 
 def load_image_label_data(images_dir, labels_excel_path):
@@ -105,52 +105,46 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, con
                              std=[0.229, 0.224, 0.225])
     ])
 
-    # Load paths and labels
-    image_paths, labels = load_image_label_data(images_dir, labels_csv_path)
+    # Load CSV
+    df = pd.read_csv(labels_csv_path)
+    df['image_path'] = df['id'].apply(lambda x: os.path.join(images_dir, x))
+    df = df[df['image_path'].apply(os.path.exists)]
 
-    # Split data
-    train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-        image_paths, labels, test_size=0.4, stratify=labels, random_state=random_seed
-    )
-    val_paths, test_paths, val_labels, test_labels = train_test_split(
-        temp_paths, temp_labels, test_size=0.5, stratify=temp_labels, random_state=random_seed
+    # Map label
+    df['fire'] = df['fire'].fillna(0).astype(int)
+    df['smoke'] = df['smoke'].fillna(0).astype(int)
+    df['label'] = df.apply(lambda row: 1 if row['fire'] == 1 or row['smoke'] == 1 else 0, axis=1)
+
+    # ---------- Handle test-only datasets ----------
+    test_only_sources = config.get("dataset", {}).get("test_only", [])
+    test_df = df[df['dataset'].isin(test_only_sources)]
+    remaining_df = df[~df['dataset'].isin(test_only_sources)]
+
+    # Split remaining into train/val
+    val_ratio = config["dataset"]["val_ratio"]
+    train_df, val_df = train_test_split(
+        remaining_df, test_size=val_ratio, stratify=remaining_df['label'], random_state=random_seed
     )
 
-    # Weighted sampling
-    class_counts = np.bincount(train_labels)
+    # Weighted sampling for train
+    class_counts = np.bincount(train_df['label'])
     class_weights = 1. / torch.tensor(class_counts, dtype=torch.float)
-    sample_weights = [class_weights[label] for label in train_labels]
-    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_labels), replacement=True)
+    sample_weights = [class_weights[label] for label in train_df['label']]
+    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_df), replacement=True)
 
     # Create datasets
-    train_dataset = FireSmokeDatasetFromLists(train_paths, train_labels, transform=train_transform)
-    val_dataset = FireSmokeDatasetFromLists(val_paths, val_labels, transform=test_transform)
-    test_dataset = FireSmokeDatasetFromLists(test_paths, test_labels, transform=test_transform)
+    train_dataset = FireSmokeDatasetFromLists(train_df['image_path'].tolist(), train_df['label'].tolist(), transform=train_transform)
+    val_dataset = FireSmokeDatasetFromLists(val_df['image_path'].tolist(), val_df['label'].tolist(), transform=test_transform)
+    test_dataset = FireSmokeDatasetFromLists(test_df['image_path'].tolist(), test_df['label'].tolist(), transform=test_transform)
 
     # Create loaders
     dataloader_params = config.get("dataloader", {})
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=sampler,
-        **dataloader_params
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        **dataloader_params
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        **dataloader_params
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, **dataloader_params)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, **dataloader_params)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **dataloader_params)
 
-    # Optional print
     print(f"Train size: {len(train_dataset)}")
     print(f"Validation size: {len(val_dataset)}")
-    print(f"Test size: {len(test_dataset)}")
+    print(f"Test size: {len(test_dataset)} (includes test-only datasets)")
 
     return train_loader, val_loader, test_loader, len(class_counts)
