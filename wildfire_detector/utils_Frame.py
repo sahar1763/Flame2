@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from sklearn.cluster import DBSCAN
 from scipy.spatial.transform import Rotation as R
+from scipy.optimize import linear_sum_assignment
 
 
 def create_homography(pts_dst, pts_src):
@@ -76,7 +77,7 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
     """
     active_pixels = np.argwhere(diff_map > threshold)
     if len(active_pixels) == 0:
-        return [], np.full_like(diff_map, -1), []
+        return [], [], []
 
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(active_pixels)
     labels_flat = clustering.labels_
@@ -169,7 +170,7 @@ def associate_clusters(centers_phase1, centers_phase0, distance_threshold):
     return associations
 
 
-def extract_sift_descriptors(image, cluster_centers, gsd, patch_size_meters=5.0):
+def extract_sift_descriptors(image, cluster_centers, patch_size_px=64.0):
     """
     Extracts SIFT descriptors for a list of centroids while strictly preserving
     the input order, regardless of whether SIFT rejects certain points.
@@ -182,7 +183,7 @@ def extract_sift_descriptors(image, cluster_centers, gsd, patch_size_meters=5.0)
         The list of centroids from your clustering/detection phase.
     gsd : float
         Ground Sample Distance (meters/pixel).
-    patch_size_meters : float
+    patch_size_px : float
         The physical size of the feature to describe.
 
     Returns:
@@ -198,16 +199,15 @@ def extract_sift_descriptors(image, cluster_centers, gsd, patch_size_meters=5.0)
     else:
         gray = image.copy()
 
-    # 2. Setup Dimensions and Padding
-    # patch_size_px defines the 'size' parameter for the KeyPoint
-    patch_size_px = float(patch_size_meters / gsd)
+    # Setup Dimensions and Padding
+    patch_size_px = np.clip(patch_size_px, 16, 100)
 
     # We add a margin to ensure SIFT has neighborhood pixels for
     # gradient calculation, even for points on the image edge.
     margin = int(patch_size_px * 2)
     padded_img = cv2.copyMakeBorder(
         gray, margin, margin, margin, margin, cv2.BORDER_REPLICATE
-    )
+    ).astype(np.uint8)
 
     # 3. Create KeyPoints in the Padded Coordinate System
     input_kps = []
@@ -216,7 +216,7 @@ def extract_sift_descriptors(image, cluster_centers, gsd, patch_size_meters=5.0)
         # Note: cv2.KeyPoint uses (x, y) order
         kp = cv2.KeyPoint(x=float(cx) + margin,
                           y=float(cy) + margin,
-                          _size=patch_size_px)
+                          size=patch_size_px)
         input_kps.append(kp)
 
     # 4. Compute SIFT
@@ -253,11 +253,7 @@ def compute_cluster_cost_matrix(
     clusters_phase1,
     clusters_phase0,
     gsd,
-    distance_threshold=np.inf,
-    w_dist=0.4,
-    w_desc=0.4,
-    w_area=0.1,
-    w_maxval=0.1
+    config,
 ):
     """
     Compute a cost matrix between clusters in two images.
@@ -289,6 +285,15 @@ def compute_cluster_cost_matrix(
         shape (len(clusters_phase1), len(clusters_phase0))
     """
 
+    distance_threshold = config['cost_matrix']['max_distance']
+    desc_score_threshold = config['cost_matrix']['desc_score_threshold']
+    temp_threshold = config['cost_matrix']['temp_threshold']
+    area_ratio_threshold = config['cost_matrix']['area_ratio_threshold']
+    w_dist = config['cost_matrix']['scaling_weights']['dist']
+    w_desc = config['cost_matrix']['scaling_weights']['desc']
+    w_area = config['cost_matrix']['scaling_weights']['area']
+    w_maxval = config['cost_matrix']['scaling_weights']['maxval']
+
     n1 = len(clusters_phase1)
     n0 = len(clusters_phase0)
 
@@ -310,8 +315,12 @@ def compute_cluster_cost_matrix(
             dist_px = np.linalg.norm(center1 - center0)
             dist_m = dist_px * gsd
 
+            print(f"GSD: {gsd}")
+            print(f"dist_px: {dist_px}")
+            print(f"dist_m: {dist_m}")
+
             if dist_m > distance_threshold:
-                cost_matrix[i, j] = np.inf
+                cost_matrix[i, j] = 100
                 continue
 
             dist_score = dist_m / distance_threshold
@@ -321,14 +330,20 @@ def compute_cluster_cost_matrix(
                 desc_score = 1.0  # maximum distance if descriptor missing
             else:
                 desc_score = 1 - np.dot(desc1, desc0) / (np.linalg.norm(desc1) * np.linalg.norm(desc0))
+                if desc_score > desc_score_threshold:
+                    cost_matrix[i, j] = 100
 
             # Area similarity
             area_ratio = min(area1, area0) / max(area1, area0)
             area_score = 1 - area_ratio
+            if area_ratio > area_ratio_threshold:
+                cost_matrix[i, j] = 100
 
             # Max value difference
             maxval_diff = abs(maxval1 - maxval0)
             maxval_score = maxval_diff / 255.0  # normalize to [0,1]
+            if maxval_diff > temp_threshold:
+                cost_matrix[i, j] = 100
 
             # Weighted total score
             total_score = (
@@ -379,6 +394,80 @@ def compute_cluster_size_maxval(label_map, image):
         cluster_info[label] = {"size": int(cluster_size), "max_val": max_val}
 
     return cluster_info
+
+
+def match_clusters_hungarian(cost_matrix):
+    """
+    Use the Hungarian algorithm to match clusters optimally based on the cost matrix.
+
+    Parameters
+    ----------
+    cost_matrix : np.ndarray
+        Shape (num_clusters_phase1, num_clusters_phase0)
+
+    Returns
+    -------
+    unmatched_mask : np.ndarray, bool
+        True for clusters in phase1 that have NO valid match in phase0.
+    matches : list of tuples
+        List of (idx_phase1, idx_phase0) for matched clusters
+    """
+    num_phase1 = cost_matrix.shape[0]
+    unmatched_mask = np.ones(num_phase1, dtype=bool)  # assume unmatched initially
+    matches = []
+
+    # Hungarian assignment
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] < 50:
+            unmatched_mask[r] = False
+            matches.append((r, c))
+        else:
+            # cost is infinite → no valid match
+            unmatched_mask[r] = True
+
+    return unmatched_mask, matches
+
+
+def filter_unmatched_clusters(unmatched_mask, centers, bboxes, label_map=None):
+    """
+    Filter out clusters that have no valid match based on unmatched_mask.
+
+    Parameters
+    ----------
+    unmatched_mask : np.ndarray of bool
+        True for clusters that have NO valid match.
+    centers : list of tuples or np.ndarray
+        Cluster centers (y,x) for phase1.
+    bboxes : list of tuples
+        Bounding boxes for clusters in phase1.
+    label_map : np.ndarray, optional
+        Label map corresponding to phase1 clusters. If provided, filtered as well.
+
+    Returns
+    -------
+    filtered_centers : list
+        Cluster centers with only matched clusters.
+    filtered_bboxes : list
+        Bounding boxes of matched clusters.
+    filtered_label_map : np.ndarray or None
+        Filtered label map (if provided), else None.
+    """
+    # Indices of matched clusters
+    unmatched_indices = np.where(unmatched_mask)[0]
+
+    filtered_centers = [centers[i] for i in unmatched_indices]
+    filtered_bboxes = [bboxes[i] for i in unmatched_indices]
+
+    filtered_label_map = None
+    if label_map is not None:
+        # Keep only labels corresponding to matched clusters
+        filtered_label_map = np.zeros_like(label_map)
+        for new_idx, old_idx in enumerate(unmatched_indices):
+            filtered_label_map[label_map == old_idx] = new_idx
+
+    return filtered_centers, filtered_bboxes, filtered_label_map
 
 
 def compute_cluster_scores(

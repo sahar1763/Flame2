@@ -58,6 +58,22 @@ dbscan:
 # Cluster Scoring
 # ---------------------------------------------------
 
+cost_matrix:
+  max_distance: 3             # Maximum allowed physical distance between clusters (in meters).
+  desc_score_threshold: 0.6
+  temp_threshold: 50
+  area_ratio_threshold: 0.5
+                              # Pairs beyond this distance will get a cost of infinity.
+  scaling_weights:
+    dist: 0.5                # Weight of the physical distance component in the total cost.
+    desc: 0.0                # Weight of the descriptor similarity (SIFT) component in the total cost.
+    area: 0.3                # Weight of the cluster area similarity component in the total cost.
+    maxval: 0.2              # Weight of the maximum pixel value similarity component in the total cost.
+
+# ---------------------------------------------------
+# Cluster Scoring
+# ---------------------------------------------------
+
 scoring:
   norm_size: 9                 # Fire area threshold [m^2] ,  equal to max_size_m^2
   norm_intensity: 200           # Normalized average cluster intensity

@@ -143,7 +143,6 @@ class ScanManager:
         # === Step 5: Save result ===
         self.corners[frame_id] = ground_corners  # ndarray(N, 3)
 
-    
     def phase1(self, image1: np.ndarray, metadata: dict):
         """
         Process a new IR frame using stored Scan0 reference.
@@ -211,13 +210,10 @@ class ScanManager:
                                           borderValue=np.median(image0))
 
         # Preprocess, compare, cluster, and score
-        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
-        diff_map = compute_positive_difference(image0_proj, image1)
-        diff_map = postprocess_difference_map(diff_map, image1, threshold=self.config['postprocessing']['threshold'],
-                                              temp_threshold=self.config['postprocessing']['temp_threshold'])
+        # image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
 
         # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
-        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2)* np.sqrt(eps_distance_factor))),1,10)) # Need to verify that expected pixels are within the radius
+        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2)*np.sqrt(eps_distance_factor))),1,10)) # Need to verify that expected pixels are within the radius
         min_samples = int(np.floor(min_samples_factor * eps_distance ** 2))
         # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
         # === Phase 1: Clustering ===
@@ -237,6 +233,9 @@ class ScanManager:
             min_contrast=self.config['dbscan']['min_contrast']  # Contrast-based center selection
         )
 
+        print(f"\nlen(image0_centers_pixels): {len(image0_centers_pixels)}\n")
+        print(f"len(image1_centers_pixels): {len(image1_centers_pixels)}\n")
+
         # IF no detection, return empty array
         if len(image1_centers_pixels) == 0:
             return []
@@ -246,15 +245,13 @@ class ScanManager:
             final_descriptors_img0, _ = extract_sift_descriptors(
                 image=image0_proj,
                 cluster_centers=image0_centers_pixels,
-                gsd=GSD,
-                patch_size_meters=5.0
+                patch_size_px=fire_length_pixel
             )
 
             final_descriptors_img1, _ = extract_sift_descriptors(
                 image=image1,
                 cluster_centers=image1_centers_pixels,
-                gsd=GSD,
-                patch_size_meters=5.0
+                patch_size_px=fire_length_pixel
             )
 
             # --- Compute cluster sizes and max values ---
@@ -280,34 +277,36 @@ class ScanManager:
                     "max_val": cluster_info_img1.get(idx, {}).get("max_val", 0.0)
                 }
 
-            # # --- Normalize descriptors for cosine distance ---
-            # for idx, c in clusters_phase0.items():
-            #     desc = c["descriptor"]
-            #     if desc is not None:
-            #         clusters_phase0[idx]["descriptor"] = desc / np.linalg.norm(desc)
-            #
-            # for idx, c in clusters_phase1.items():
-            #     desc = c["descriptor"]
-            #     if desc is not None:
-            #         clusters_phase1[idx]["descriptor"] = desc / np.linalg.norm(desc)
-
             # --- Compute the cost matrix ---
             cost_matrix = compute_cluster_cost_matrix(
                 clusters_phase1,
                 clusters_phase0,
                 gsd=GSD,
-                distance_threshold=self.config['scoring']['max_distance'],
-                w_dist=self.config['scoring']['scaling_weights']['dist'],
-                w_desc=self.config['scoring']['scaling_weights']['desc'],
-                w_area=self.config['scoring']['scaling_weights']['area'],
-                w_maxval=self.config['scoring']['scaling_weights']['maxval']
+                config=self.config,
             )
 
-        # Now 'cost_matrix' contains the final scores between clusters
+            # --- Hungarian matching ---
+            unmatched_mask, _ = match_clusters_hungarian(cost_matrix)
+
+            # --- Filter phase1 data based on matches ---
+            centers_pixels, bboxes_pixels, label_map = filter_unmatched_clusters(
+                unmatched_mask,
+                image1_centers_pixels,
+                image1_bboxes_pixels,
+                image1_label_map
+            )
+
+            # IF no detection, return empty array
+            if len(centers_pixels) == 0:
+                return []
+        else:
+            centers_pixels = image1_centers_pixels
+            label_map = image1_label_map
+            bboxes_pixels = image1_bboxes_pixels
 
         # === Compute scores ===
         scores = compute_cluster_scores(
-            image1_label_map,
+            label_map,
             image1,
             GSD,
             norm_size=self.config['scoring']['norm_size'],
@@ -317,7 +316,7 @@ class ScanManager:
 
         # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
         required_fov2 = []
-        for bbox in image1_bboxes_pixels:
+        for bbox in bboxes_pixels:
             width = bbox[2] - bbox[0]
             height = bbox[3] - bbox[1]
             fire_size_IR = max(width, height)
@@ -338,18 +337,19 @@ class ScanManager:
         # Return structured result
         # Output is different in demo mode according to debug results # TODO : optional, convert to geo and adjust return
         results = []
-        for i in range(len(image1_centers_pixels)):
+        for i in range(len(centers_pixels)):
             results.append({
                 'Frame_index': frame_id,
-                'loc': image1_centers_pixels[i],
-                'bbox': image1_bboxes_pixels[i],
+                'loc': centers_pixels[i],
+                'bbox': bboxes_pixels[i],
                 'confidence_pct': scores[i],
                 # TODO (Maayan) switch to intensity parameter according to assaf instructions
                 'required_fov2': required_fov2[i]
             }) # Not similar to real output, ICD is different and output is in pixels and not geo
 
         # Plots of phase1 for debugging
-        plot_phase1(image1, corners_0, corners_1, image1_centers_pixels, image1_bboxes_pixels, frame_id) # TODO: Delete later
+        plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
+        plot_phase1(image0_proj, corners_0, corners_1, centers_pixels, bboxes_pixels, 100+frame_id) # TODO: Delete later
 
         return results
 
