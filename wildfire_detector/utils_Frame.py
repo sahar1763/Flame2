@@ -118,6 +118,269 @@ def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_sample
     return centers, label_map, bboxes
 
 
+def associate_clusters(centers_phase1, centers_phase0, distance_threshold):
+    """
+    For each cluster center in phase1, find all candidate centers in phase0
+    within distance_threshold.
+
+    Parameters
+    ----------
+    centers_phase1 : list of (y, x)
+    centers_phase0 : list of (y, x)
+    distance_threshold : float (in pixels)
+
+    Returns
+    -------
+    associations : dict
+        {
+            idx_phase1: [
+                (idx_phase0, distance),
+                ...
+            ]
+        }
+        Each list is sorted from closest to farthest.
+    """
+
+    associations = {}
+
+    if not centers_phase1:
+        return {}
+
+    if not centers_phase0:
+        return {i: [] for i in range(len(centers_phase1))}
+
+    p1 = np.array(centers_phase1, dtype=float)
+    p0 = np.array(centers_phase0, dtype=float)
+
+    for i, c1 in enumerate(p1):
+
+        # Compute distances to all phase0 centers
+        dists = np.linalg.norm(p0 - c1, axis=1)
+
+        # Filter by threshold
+        valid = np.where(dists <= distance_threshold)[0]
+
+        # Build sorted list of (index, distance)
+        matches = [(int(j), float(dists[j])) for j in valid]
+        matches.sort(key=lambda x: x[1])
+
+        associations[i] = matches
+
+    return associations
+
+
+def extract_sift_descriptors(image, cluster_centers, gsd, patch_size_meters=5.0):
+    """
+    Extracts SIFT descriptors for a list of centroids while strictly preserving
+    the input order, regardless of whether SIFT rejects certain points.
+
+    Parameters:
+    -----------
+    image : np.ndarray
+        The input IR image (Gray or BGR).
+    cluster_centers : list of (y, x)
+        The list of centroids from your clustering/detection phase.
+    gsd : float
+        Ground Sample Distance (meters/pixel).
+    patch_size_meters : float
+        The physical size of the feature to describe.
+
+    Returns:
+    --------
+    final_descriptors : np.ndarray
+        An (N x 128) array where index 'i' matches cluster_centers[i].
+    valid_mask : np.ndarray
+        A boolean array indicating if a valid descriptor was found for that index.
+    """
+    # 1. Image Pre-processing
+    if image.ndim == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    # 2. Setup Dimensions and Padding
+    # patch_size_px defines the 'size' parameter for the KeyPoint
+    patch_size_px = float(patch_size_meters / gsd)
+
+    # We add a margin to ensure SIFT has neighborhood pixels for
+    # gradient calculation, even for points on the image edge.
+    margin = int(patch_size_px * 2)
+    padded_img = cv2.copyMakeBorder(
+        gray, margin, margin, margin, margin, cv2.BORDER_REPLICATE
+    )
+
+    # 3. Create KeyPoints in the Padded Coordinate System
+    input_kps = []
+    for (cy, cx) in cluster_centers:
+        # Shift coords to account for the padding
+        # Note: cv2.KeyPoint uses (x, y) order
+        kp = cv2.KeyPoint(x=float(cx) + margin,
+                          y=float(cy) + margin,
+                          _size=patch_size_px)
+        input_kps.append(kp)
+
+    # 4. Compute SIFT
+    sift = cv2.SIFT_create()
+    # keypoints_out contains ONLY the points SIFT successfully described
+    keypoints_out, descriptors_out = sift.compute(padded_img, input_kps)
+
+    # 5. Restore Order and Handle Missing Descriptors
+    # Initialize empty results based on the original input length
+    num_inputs = len(cluster_centers)
+    final_descriptors = np.zeros((num_inputs, 128), dtype=np.float32)
+    valid_mask = np.zeros(num_inputs, dtype=bool)
+
+    if descriptors_out is not None:
+        # Match SIFT outputs back to original indices using spatial coordinates
+        for i, kp_out in enumerate(keypoints_out):
+            # Translate back to original (non-padded) coordinates
+            curr_x = kp_out.pt[0] - margin
+            curr_y = kp_out.pt[1] - margin
+
+            # Find which original centroid this corresponds to
+            for original_idx, (orig_cy, orig_cx) in enumerate(cluster_centers):
+                # Use a small distance squared threshold to handle float precision
+                dist_sq = (curr_x - orig_cx) ** 2 + (curr_y - orig_cy) ** 2
+                if dist_sq < 0.01:
+                    final_descriptors[original_idx] = descriptors_out[i]
+                    valid_mask[original_idx] = True
+                    break
+
+    return final_descriptors, valid_mask
+
+
+def compute_cluster_cost_matrix(
+    clusters_phase1,
+    clusters_phase0,
+    gsd,
+    distance_threshold=np.inf,
+    w_dist=0.4,
+    w_desc=0.4,
+    w_area=0.1,
+    w_maxval=0.1
+):
+    """
+    Compute a cost matrix between clusters in two images.
+
+    Parameters
+    ----------
+    clusters_phase1 : dict
+        { idx: { "center": (y,x),
+                  "descriptor": np.array(128,) or None,
+                  "area": int,
+                  "max_val": float } }
+
+    clusters_phase0 : dict
+        same structure as clusters_phase1
+
+    gsd : float
+        meters per pixel
+
+    distance_threshold : float
+        maximum allowed physical distance (meters).
+        If exceeded, the score is set to infinity.
+
+    w_dist, w_desc, w_area, w_maxval : float
+        weights for each component. Should sum to 1.
+
+    Returns
+    -------
+    cost_matrix : np.ndarray
+        shape (len(clusters_phase1), len(clusters_phase0))
+    """
+
+    n1 = len(clusters_phase1)
+    n0 = len(clusters_phase0)
+
+    cost_matrix = np.zeros((n1, n0), dtype=float)
+
+    for i, c1 in clusters_phase1.items():
+        center1 = np.array(c1["center"])
+        desc1 = c1["descriptor"]
+        area1 = c1["area"]
+        maxval1 = c1["max_val"]
+
+        for j, c0 in clusters_phase0.items():
+            center0 = np.array(c0["center"])
+            desc0 = c0["descriptor"]
+            area0 = c0["area"]
+            maxval0 = c0["max_val"]
+
+            # Physical distance
+            dist_px = np.linalg.norm(center1 - center0)
+            dist_m = dist_px * gsd
+
+            if dist_m > distance_threshold:
+                cost_matrix[i, j] = np.inf
+                continue
+
+            dist_score = dist_m / distance_threshold
+
+            # Descriptor similarity (cosine distance)
+            if desc1 is None or desc0 is None:
+                desc_score = 1.0  # maximum distance if descriptor missing
+            else:
+                desc_score = 1 - np.dot(desc1, desc0) / (np.linalg.norm(desc1) * np.linalg.norm(desc0))
+
+            # Area similarity
+            area_ratio = min(area1, area0) / max(area1, area0)
+            area_score = 1 - area_ratio
+
+            # Max value difference
+            maxval_diff = abs(maxval1 - maxval0)
+            maxval_score = maxval_diff / 255.0  # normalize to [0,1]
+
+            # Weighted total score
+            total_score = (
+                w_dist * dist_score +
+                w_desc * desc_score +
+                w_area * area_score +
+                w_maxval * maxval_score
+            )
+
+            cost_matrix[i, j] = total_score
+
+    return cost_matrix
+
+
+def compute_cluster_size_maxval(label_map, image):
+    """
+    Compute size (in pixels) and max pixel value for each cluster.
+
+    Parameters
+    ----------
+    label_map : np.ndarray
+        Labeled map of clusters (e.g., output of clustering algorithm).
+    image : np.ndarray
+        Original image (grayscale) to compute max pixel value.
+
+    Returns
+    -------
+    cluster_info : dict
+        { label: { "size": int, "max_val": float } }
+    """
+
+    cluster_info = {}
+    unique_labels = np.unique(label_map)
+
+    for label in unique_labels:
+        if label == -1:
+            continue  # ignore background or noise
+
+        mask = (label_map == label)
+        cluster_size = np.sum(mask)
+
+        if cluster_size == 0:
+            cluster_info[label] = {"size": 0, "max_val": 0.0}
+            continue
+
+        max_val = float(np.max(image[mask]))
+
+        cluster_info[label] = {"size": int(cluster_size), "max_val": max_val}
+
+    return cluster_info
+
+
 def compute_cluster_scores(
     label_map,
     image1,
