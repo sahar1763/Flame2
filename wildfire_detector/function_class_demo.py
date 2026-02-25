@@ -187,19 +187,20 @@ class ScanManager:
             min_contrast=self.config['dbscan']['min_contrast']  # Contrast-based center selection
         )
 
-        self.centers_pixels0[frame_id] = image0_centers_pixels
-        cluster_info_img0 = compute_cluster_size_maxval(image0_label_map, frame, GSD)
-        self.cluster_info0[frame_id] = cluster_info_img0
-
-        if len(cluster_info_img0) > 0:
+        if len(image0_centers_pixels) > 0:
+            cluster_info_img0 = compute_cluster_size_maxval(image0_label_map, frame, GSD)
             # --- Compute cluster descriptors ---
             final_descriptors_img0, _ = extract_orb_descriptors(
                 image=image0,
                 cluster_centers=image0_centers_pixels,
                 patch_size_px=fire_length_pixel
             )
-        else: final_descriptors_img0 = []
+        else:
+            cluster_info_img0 = []
+            final_descriptors_img0 = []
 
+        self.centers_pixels0[frame_id] = image0_centers_pixels
+        self.cluster_info0[frame_id] = cluster_info_img0
         self.cluster_descriptors0[frame_id] = final_descriptors_img0
 
     def phase1(self, image1: np.ndarray, metadata: dict):
@@ -250,25 +251,9 @@ class ScanManager:
         # Load scan0 image and info
         image0 = self.frames[frame_id]
         corners_0 = self.corners[frame_id] # at world coordinates  # x y z in meters for demo
-        centers_pixels0_org = np.array(self.centers_pixels0[frame_id])
+        centers_pixels0_org = self.centers_pixels0[frame_id]
         cluster_info_img0 = self.cluster_info0[frame_id]
         final_descriptors_img0 = self.cluster_descriptors0[frame_id]
-
-        # Get parameters for geo2pixel conversion
-        img_size = self.config["image"]["ir_size"]
-        phi_deg = metadata["uav"]["pitch_deg"]
-        theta_deg = metadata["uav"]["yaw_deg"]
-        h = metadata["uav"]["altitude_agl_meters"]
-        hfov_deg = metadata["payload"]["field_of_view_deg"]
-
-        # --- Geo to pixel coordinates in image1 - internal function for demo---
-        pixels_img0_at_img1, corners_1 = geo2pixel(corners_0=corners_0, theta1=theta_deg, phi1=phi_deg, h1=h, hfov1=hfov_deg, img_size=img_size)
-        pts_image = self.points0_arrange
-        homography_mat = create_homography(pts_image, pixels_img0_at_img1)
-
-        # Project image0 points to image1 coordinates
-        image0_centers_pixels = project_points_with_homography(centers_pixels0_org, homography_mat).tolist()
-
 
         # Preprocess, compare, cluster, and score
         image1 = preprocess_images(image1, applying=self.config['preprocessing']['apply'])
@@ -293,21 +278,37 @@ class ScanManager:
         # --- Compute cluster sizes and max values ---
         cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
 
-
-        print(f"\nlen(image0_centers_pixels): {len(image0_centers_pixels)}\n")
+        print(f"\nlen(image0_centers_pixels): {len(centers_pixels0_org)}\n")
         print(f"len(image1_centers_pixels): {len(image1_centers_pixels)}\n")
 
         # IF no detection, return empty array
         if len(image1_centers_pixels) == 0:
             return []
 
-        if len(image0_centers_pixels) > 0:
-            # --- Compute cluster descriptors ---
+        if len(centers_pixels0_org) > 0:
+            # --- Compute image1 cluster descriptors ---
             final_descriptors_img1, _ = extract_orb_descriptors(
                 image=image1,
                 cluster_centers=image1_centers_pixels,
                 patch_size_px=fire_length_pixel
             )
+
+            # Get parameters for geo2pixel conversion
+            img_size = self.config["image"]["ir_size"]
+            phi_deg = metadata["uav"]["pitch_deg"]
+            theta_deg = metadata["uav"]["yaw_deg"]
+            h = metadata["uav"]["altitude_agl_meters"]
+            hfov_deg = metadata["payload"]["field_of_view_deg"]
+
+            # --- Geo to pixel coordinates in image1 - internal function for demo---
+            pixels_img0_at_img1, corners_1 = geo2pixel(corners_0=corners_0, theta1=theta_deg, phi1=phi_deg, h1=h,
+                                                       hfov1=hfov_deg, img_size=img_size)
+            pts_image = self.points0_arrange
+            homography_mat = create_homography(pts_image, pixels_img0_at_img1)
+
+            # Project image0 points to image1 coordinates
+            centers_pixels0_array = np.array(centers_pixels0_org)
+            image0_centers_pixels = project_points_with_homography(centers_pixels0_array, homography_mat).tolist()
 
             # --- Build cluster dictionaries with descriptors and metadata ---
             clusters_phase0 = {}
@@ -355,13 +356,29 @@ class ScanManager:
             cluster_info_filtered = cluster_info_img1
             bboxes_pixels = image1_bboxes_pixels
 
+            # === For Debug Only: === # TODO: Delete
+            # Get parameters for geo2pixel conversion
+            img_size = self.config["image"]["ir_size"]
+            phi_deg = metadata["uav"]["pitch_deg"]
+            theta_deg = metadata["uav"]["yaw_deg"]
+            h = metadata["uav"]["altitude_agl_meters"]
+            hfov_deg = metadata["payload"]["field_of_view_deg"]
+
+            # --- Geo to pixel coordinates in image1 - internal function for demo---
+            pixels_img0_at_img1, corners_1 = geo2pixel(corners_0=corners_0, theta1=theta_deg, phi1=phi_deg, h1=h,
+                                                       hfov1=hfov_deg, img_size=img_size)
+            # ========================
+
         # === Compute scores ===
+        start3 = time.perf_counter()
         scores = compute_cluster_scores(
             cluster_info_filtered,
             norm_size=self.config['scoring']['norm_size'],
             norm_intensity=self.config['scoring']['norm_intensity'],
             weights=self.config['scoring']['scaling_weights'],
         )  # TODO (Maayan) switch to intensity parameter according to assaf instructions
+        end3 = time.perf_counter()
+        print("scores RUN time:", (end3 - start3) * 1000, "[ms]")
 
         # === Compute Required FOVs Based on Detected Cluster Bounding Boxes ===
         required_fov2 = []
