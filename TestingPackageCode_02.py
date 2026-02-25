@@ -40,20 +40,16 @@ if __name__ == "__main__":
     # Defining PHI, THETA
     PHI, THETA = Phi_Theta_Generation()
 
-    # ==== Phase 0 ====
-
     # Creating scan_0_inputs
     scan_0_inputs_imgs, scan_0_inputs_metadata = Creating_Scan0_input(PHI, THETA, h0, hfov0, metadata, sm.config)
+    # Creating phase1_inputs
+    phase1_inputs_imgs, phase1_inputs_metadata, clusters_num_array, _ = Creating_Phase1_input(PHI, THETA, x0, y0, h0, hfov0, metadata, sm.config)
 
+    # Reorganized scan0 input
     for i in range(scan_0_inputs_imgs.shape[0]):
         frame_ir = scan_0_inputs_imgs[i]
         metadata = scan_0_inputs_metadata[i]
         sm.phase0(frame_ir, metadata)
-
-    # ==== Phase 1 ====
-
-    # Creating phase1_inputs
-    phase1_inputs_imgs, phase1_inputs_metadata, clusters_num_array, _ = Creating_Phase1_input(PHI, THETA, x0, y0, h0, hfov0, metadata, sm.config)
 
     # # Fire Max Size (length)
     # fire_size = sm.config['fire']['max_size_m']  # [m]

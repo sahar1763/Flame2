@@ -5,6 +5,20 @@ from scipy.spatial.transform import Rotation as R
 from scipy.optimize import linear_sum_assignment
 
 
+def project_points_with_homography(corners, H):
+    # corners: array of shape (N, 2), where N is the number of points.
+    ones = np.ones((corners.shape[0], 1))
+    corners_h = np.hstack([corners, ones])  # Shape: (N, 3)
+
+    projected_h = (H @ corners_h.T).T  # Shape: (N, 3)
+
+    # Convert back from homogeneous to 2D pixel coordinates by dividing x and y by the scale (z).
+    projected_pixels = projected_h[:, :2] / projected_h[:, 2, np.newaxis]
+
+    # Return the projected 2D pixel coordinates as a (N, 2) array.
+    return projected_pixels
+
+
 def create_homography(pts_dst, pts_src):
     """
     Computes the homography matrix from pts_src to pts_dst.
@@ -13,18 +27,14 @@ def create_homography(pts_dst, pts_src):
     return H
 
 
-def preprocess_images(image1, image2, applying=False):
-    img1 = image1.astype(np.float32)
-    img2 = image2.astype(np.float32)
-
+def preprocess_images(image, applying=False):
     if applying:
-        img1 = img1 - img1.mean()
-        img1 = np.maximum(img1, 0)
-
-        img2 = img2 - img2.mean()
-        img2 = np.maximum(img2, 0)
-
-    return img1, img2
+        img = image.astype(np.float32)
+        img = img - img.mean()
+        img = np.clip(img, 0, 255)  # clamp negative values to 0 and max to 255
+        img = img.astype(np.uint8)  # convert back to uint8
+        return img
+    return image
 
 
 def compute_positive_difference(img1, img2):
@@ -170,81 +180,52 @@ def associate_clusters(centers_phase1, centers_phase0, distance_threshold):
     return associations
 
 
-def extract_sift_descriptors(image, cluster_centers, patch_size_px=64.0):
+def extract_orb_descriptors(image, cluster_centers, patch_size_px=31.0):
     """
-    Extracts SIFT descriptors for a list of centroids while strictly preserving
-    the input order, regardless of whether SIFT rejects certain points.
+    ORB descriptor extraction for real-time cluster tracking.
 
     Parameters:
     -----------
-    image : np.ndarray
-        The input IR image (Gray or BGR).
-    cluster_centers : list of (y, x)
-        The list of centroids from your clustering/detection phase.
-    gsd : float
-        Ground Sample Distance (meters/pixel).
     patch_size_px : float
-        The physical size of the feature to describe.
-
-    Returns:
-    --------
-    final_descriptors : np.ndarray
-        An (N x 128) array where index 'i' matches cluster_centers[i].
-    valid_mask : np.ndarray
-        A boolean array indicating if a valid descriptor was found for that index.
+        ORB default is 31. This controls the 'size' of the area described.
     """
-    # 1. Image Pre-processing
+
+    patch_size_px = np.clip(patch_size_px, 31, 64)
+
     if image.ndim == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
-        gray = image.copy()
+        gray = image
 
-    # Setup Dimensions and Padding
-    patch_size_px = np.clip(patch_size_px, 16, 100)
-
-    # We add a margin to ensure SIFT has neighborhood pixels for
-    # gradient calculation, even for points on the image edge.
-    margin = int(patch_size_px * 2)
-    padded_img = cv2.copyMakeBorder(
-        gray, margin, margin, margin, margin, cv2.BORDER_REPLICATE
-    ).astype(np.uint8)
-
-    # 3. Create KeyPoints in the Padded Coordinate System
-    input_kps = []
-    for (cy, cx) in cluster_centers:
-        # Shift coords to account for the padding
-        # Note: cv2.KeyPoint uses (x, y) order
-        kp = cv2.KeyPoint(x=float(cx) + margin,
-                          y=float(cy) + margin,
-                          size=patch_size_px)
-        input_kps.append(kp)
-
-    # 4. Compute SIFT
-    sift = cv2.SIFT_create()
-    # keypoints_out contains ONLY the points SIFT successfully described
-    keypoints_out, descriptors_out = sift.compute(padded_img, input_kps)
-
-    # 5. Restore Order and Handle Missing Descriptors
-    # Initialize empty results based on the original input length
     num_inputs = len(cluster_centers)
-    final_descriptors = np.zeros((num_inputs, 128), dtype=np.float32)
+    if num_inputs == 0:
+        return np.array([]), np.array([], dtype=bool)
+
+    # Create KeyPoints
+    input_kps = [
+        cv2.KeyPoint(x=float(cx), y=float(cy), size=patch_size_px)
+        for (cy, cx) in cluster_centers
+    ]
+
+    # ORB
+    orb = cv2.ORB_create(patchSize=int(patch_size_px))
+    keypoints_out, descriptors_out = orb.compute(gray, input_kps)
+
+    final_descriptors = np.zeros((num_inputs, 32), dtype=np.uint8)
     valid_mask = np.zeros(num_inputs, dtype=bool)
 
     if descriptors_out is not None:
-        # Match SIFT outputs back to original indices using spatial coordinates
-        for i, kp_out in enumerate(keypoints_out):
-            # Translate back to original (non-padded) coordinates
-            curr_x = kp_out.pt[0] - margin
-            curr_y = kp_out.pt[1] - margin
 
-            # Find which original centroid this corresponds to
-            for original_idx, (orig_cy, orig_cx) in enumerate(cluster_centers):
-                # Use a small distance squared threshold to handle float precision
-                dist_sq = (curr_x - orig_cx) ** 2 + (curr_y - orig_cy) ** 2
-                if dist_sq < 0.01:
-                    final_descriptors[original_idx] = descriptors_out[i]
-                    valid_mask[original_idx] = True
-                    break
+        out_coords = np.array([kp.pt for kp in keypoints_out])  # (M, 2)
+        in_coords = np.array([(cx, cy) for (cy, cx) in cluster_centers])  # (N, 2)
+
+        for i, pt in enumerate(out_coords):
+            dist_sq = np.sum((in_coords - pt) ** 2, axis=1)
+            original_idx = np.argmin(dist_sq)
+
+            if dist_sq[original_idx] < 0.01:
+                final_descriptors[original_idx] = descriptors_out[i]
+                valid_mask[original_idx] = True
 
     return final_descriptors, valid_mask
 
@@ -294,6 +275,8 @@ def compute_cluster_cost_matrix(
     w_area = config['cost_matrix']['scaling_weights']['area']
     w_maxval = config['cost_matrix']['scaling_weights']['maxval']
 
+    TOTAL_BITS = 256
+
     n1 = len(clusters_phase1)
     n0 = len(clusters_phase0)
 
@@ -315,9 +298,9 @@ def compute_cluster_cost_matrix(
             dist_px = np.linalg.norm(center1 - center0)
             dist_m = dist_px * gsd
 
-            print(f"GSD: {gsd}")
-            print(f"dist_px: {dist_px}")
-            print(f"dist_m: {dist_m}")
+            # print(f"GSD: {gsd}")
+            # print(f"dist_px: {dist_px}")
+            # print(f"dist_m: {dist_m}")
 
             if dist_m > distance_threshold:
                 cost_matrix[i, j] = 100
@@ -326,10 +309,13 @@ def compute_cluster_cost_matrix(
             dist_score = dist_m / distance_threshold
 
             # Descriptor similarity (cosine distance)
-            if desc1 is None or desc0 is None:
-                desc_score = 1.0  # maximum distance if descriptor missing
+            if desc1 is None or desc0 is None or np.any(np.isnan(desc1)) or np.any(np.isnan(desc0)) \
+                    or np.linalg.norm(desc1) == 0 or np.linalg.norm(desc0) == 0:
+                desc_score = 1.0  # maximum distance if descriptor missing or invalid
             else:
-                desc_score = 1 - np.dot(desc1, desc0) / (np.linalg.norm(desc1) * np.linalg.norm(desc0))
+                diff_bits = cv2.norm(desc1, desc0, cv2.NORM_HAMMING)
+                desc_score = diff_bits / TOTAL_BITS
+
                 if desc_score > desc_score_threshold:
                     cost_matrix[i, j] = 100
 
@@ -358,40 +344,38 @@ def compute_cluster_cost_matrix(
     return cost_matrix
 
 
-def compute_cluster_size_maxval(label_map, image):
-    """
-    Compute size (in pixels) and max pixel value for each cluster.
-
-    Parameters
-    ----------
-    label_map : np.ndarray
-        Labeled map of clusters (e.g., output of clustering algorithm).
-    image : np.ndarray
-        Original image (grayscale) to compute max pixel value.
-
-    Returns
-    -------
-    cluster_info : dict
-        { label: { "size": int, "max_val": float } }
-    """
-
+def compute_cluster_size_maxval(label_map, image, gsd):
     cluster_info = {}
-    unique_labels = np.unique(label_map)
 
-    for label in unique_labels:
-        if label == -1:
-            continue  # ignore background or noise
+    flat_labels = label_map.ravel()
+    flat_image = image.ravel()
 
-        mask = (label_map == label)
-        cluster_size = np.sum(mask)
+    # remove background (-1)
+    valid = flat_labels >= 0
+    flat_labels = flat_labels[valid]
+    flat_image = flat_image[valid]
 
-        if cluster_size == 0:
-            cluster_info[label] = {"size": 0, "max_val": 0.0}
-            continue
+    # cluster sizes (pixel count)
+    counts = np.bincount(flat_labels)
 
-        max_val = float(np.max(image[mask]))
+    # max per label
+    max_vals = np.zeros_like(counts, dtype=float)
+    mean_vals = np.zeros_like(counts, dtype=float)
+    for label in range(len(counts)):
+        if counts[label] > 0:
+            max_vals[label] = flat_image[flat_labels == label].max()
+            mean_vals[label] = flat_image[flat_labels == label].mean()
+        else:
+            max_vals[label] = 0
+            mean_vals[label] = 0
 
-        cluster_info[label] = {"size": int(cluster_size), "max_val": max_val}
+    for label in range(len(counts)):
+        size_m2 = int(counts[label]) * gsd**2
+        cluster_info[label] = {
+            "size": size_m2,
+            "max_val": float(max_vals[label]),
+            "mean_val": float(mean_vals[label]),
+        }
 
     return cluster_info
 
@@ -430,7 +414,7 @@ def match_clusters_hungarian(cost_matrix):
     return unmatched_mask, matches
 
 
-def filter_unmatched_clusters(unmatched_mask, centers, bboxes, label_map=None):
+def filter_unmatched_clusters(unmatched_mask, centers, bboxes, cluster_info):
     """
     Filter out clusters that have no valid match based on unmatched_mask.
 
@@ -459,95 +443,59 @@ def filter_unmatched_clusters(unmatched_mask, centers, bboxes, label_map=None):
 
     filtered_centers = [centers[i] for i in unmatched_indices]
     filtered_bboxes = [bboxes[i] for i in unmatched_indices]
+    filtered_cluster_info = {
+        new_idx: cluster_info[old_idx]
+        for new_idx, old_idx in enumerate(unmatched_indices)
+    }
 
-    filtered_label_map = None
-    if label_map is not None:
-        # Keep only labels corresponding to matched clusters
-        filtered_label_map = np.zeros_like(label_map)
-        for new_idx, old_idx in enumerate(unmatched_indices):
-            filtered_label_map[label_map == old_idx] = new_idx
-
-    return filtered_centers, filtered_bboxes, filtered_label_map
+    return filtered_centers, filtered_bboxes, filtered_cluster_info
 
 
 def compute_cluster_scores(
-    label_map,
-    image1,
-    GSD,
+    cluster_info_filtered,
     norm_size=5**2,
     norm_intensity=200,
     weights=(0.5, 0.5, 10, 0.4),
 ):
     """
-    Compute a confidence score ∈ [0,1] for each detected fire cluster based on
-    its spatial size and thermal intensity.
-
-    The score favors clusters that are both:
-    - spatially large (big area on ground)
-    - thermally strong (high mean pixel intensity)
-
-    The process:
-    1. Compute fire area in m² and normalize to [0,1]
-    2. Compute mean intensity and normalize to [0,1]
-    3. Fuse the two with a weighted sum
-    4. Pass the result through a sigmoid to obtain a smooth confidence score
+    Compute confidence score [0,1] for each detected fire cluster
+    using precomputed cluster_info.
 
     Parameters
     ----------
-    label_map : np.ndarray
-        2D array with cluster labels (H×W).
-        Label -1 is treated as background/noise.
-
-    image1 : np.ndarray
-        Single-channel thermal or intensity image (H×W).
-
-    GSD : float
-        Ground Sample Distance [meters/pixel].
+    cluster_info_filtered : dict
+        {label: {"size": m2, "mean_val": float, "max_val": float}}
 
     norm_size : float
         Area normalization constant [m²].
-        Clusters larger than this saturate size contribution.
 
     norm_intensity : float
         Intensity normalization constant.
-        Mean intensities higher than this saturate intensity contribution.
 
     weights : tuple (wI, wA, k, t)
-        wI : weight of intensity contribution
-        wA : weight of area contribution
-        k  : sigmoid steepness (larger → sharper transition)
-        t  : sigmoid threshold (center point)
+        wI : weight of intensity
+        wA : weight of area
+        k  : sigmoid steepness
+        t  : sigmoid threshold
 
     Returns
     -------
     dict
-        {label: score} mapping, where score ∈ [0,1].
-        Higher score means higher likelihood of a real fire.
+        {label: score ∈ [0,1]}
     """
 
     scores = {}
-    unique_labels = np.unique(label_map)
     wI, wA, k, t = weights
 
-    for label in unique_labels:
-        if label == -1:
-            continue
+    for label, info in cluster_info_filtered.items():
 
-        mask = (label_map == label)
-        fire_area_pixel = np.sum(mask)
-
-        if fire_area_pixel == 0:
-            scores[label] = 0
-            continue
+        fire_area_m2 = info["size"]
+        mean_intensity = info["mean_val"]
 
         # --- Area term ---
-        fire_area_m2 = fire_area_pixel * (GSD ** 2)
-        # Clipping to avoid to dominant extreme values of one of the components in the sigmoid score function
         A_norm = np.clip(fire_area_m2 / norm_size, 0, 1.5)
 
         # --- Intensity term ---
-        mean_intensity = image1[mask].mean() # TODO: Use max instead?
-        # Clipping to avoid to dominant extreme values of one of the components in the sigmoid score function
         I_norm = np.clip(mean_intensity / norm_intensity, 0, 1.5)
 
         # --- Fusion ---
@@ -557,8 +505,7 @@ def compute_cluster_scores(
         score = 1.0 / (1.0 + np.exp(-k * (grade - t)))
         score = np.clip(score, 0, 1)
 
-        scores[label] = round(score, 3)
-
+        scores[label] = round(float(score), 3)
 
     return scores
 

@@ -131,24 +131,6 @@ def plot_phase1(diff_map, corners_0, corners_1, centers, bboxes, Frame_index, x1
     ### ========================================================
 
 
-def project_points_with_homography(corners, H):
-    # Convert input 2D corner points to homogeneous coordinates by appending a column of ones.
-    # corners: array of shape (N, 2), where N is the number of points.
-    # corners_h: array of shape (N, 3)
-    ones = np.ones((corners.shape[0], 1))
-    corners_h = np.hstack([corners, ones])  # Shape: (N, 3)
-
-    # Apply the homography transformation matrix H to the homogeneous coordinates.
-    # H is a 3x3 matrix, and the result is a set of projected homogeneous coordinates.
-    projected_h = (H @ corners_h.T).T  # Shape: (N, 3)
-
-    # Convert back from homogeneous to 2D pixel coordinates by dividing x and y by the scale (z).
-    projected_pixels = projected_h[:, :2] / projected_h[:, 2, np.newaxis]
-
-    # Return the projected 2D pixel coordinates as a (N, 2) array.
-    return projected_pixels
-
-
 def compute_vfov_from_hfov(hfov_deg, width, height):
     """
     Computes the vertical field of view (vFOV) in degrees, given the horizontal field of view (hFOV)
