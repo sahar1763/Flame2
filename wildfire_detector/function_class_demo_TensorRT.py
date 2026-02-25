@@ -407,9 +407,9 @@ class ScanManager:
         end = time.perf_counter()
         print("RUN time (no dbscan):", (end - start) * 1000 - db_runtime, "[ms]")
 
-        # Plots of phase1 for debugging
-        plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id)  # TODO: Delete later
-        plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100 + frame_id)  # TODO: Delete later
+        # # Plots of phase1 for debugging
+        # plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id)  # TODO: Delete later
+        # plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100 + frame_id)  # TODO: Delete later
 
         return results
 

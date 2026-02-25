@@ -43,13 +43,25 @@ class ScanManager:
 
         # Define model and load state
         num_classes = 2
-        resnet = models.resnet18(weights=None) #(pretrained=False)
-        num_ftrs = resnet.fc.in_features
-        resnet.fc = torch.nn.Linear(num_ftrs, num_classes)
-        resnet.load_state_dict(checkpoint["model_state"])
-        resnet = resnet.to(self.device)
-        resnet.eval()
-        self.model = resnet
+
+        model_name = self.config["phase2"]["model_name"]
+        model = getattr(models, model_name)(weights=None)
+
+        if "resnet" in model_name.lower():
+            num_ftrs = model.fc.in_features
+            model.fc = torch.nn.Linear(num_ftrs, num_classes)
+        elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
+            num_ftrs = model.classifier[-1].in_features
+            model.classifier[-1] = torch.nn.Linear(num_ftrs, num_classes)
+        elif "densenet" in model_name.lower():
+            num_ftrs = model.classifier.in_features
+            model.classifier = torch.nn.Linear(num_ftrs, num_classes)
+
+        model.load_state_dict(checkpoint["model_state"])
+        model = model.to(self.device)
+        model.eval()
+
+        self.model = model
 
         # <<< Warm up >>>
         print("\033[1m\033[96m+++++ Start warmup +++++\033[0m")
@@ -416,9 +428,9 @@ class ScanManager:
         end = time.perf_counter()
         print("RUN time (no dbscan):", (end - start) * 1000-db_runtime, "[ms]")
 
-        # Plots of phase1 for debugging
-        plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
-        plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100+frame_id) # TODO: Delete later
+        # # Plots of phase1 for debugging
+        # plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
+        # plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100+frame_id) # TODO: Delete later
 
         return results
 
