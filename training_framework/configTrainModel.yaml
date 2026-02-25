@@ -1,10 +1,10 @@
 dataset:
-  images_dir: "../Datasets_FromDvir/Datasets/rgb_images"
-  labels_csv: "../Datasets_FromDvir/Datasets/rgb_images/labels.csv"
+  images_dir: "../UnifiedDataset"
+  labels_csv: "../UnifiedDataset/labels.csv"
   image_size: 224
   val_ratio: 0.4
   test_only:
-    - Test
+    - FLAME_2
 
 #dataloader:
 #  pin_memory: true

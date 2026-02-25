@@ -22,13 +22,13 @@
 
 # RT: - at the Jetson, after we got onnx file. - Just a backup - already runs inside function_classRT code
 /usr/src/tensorrt/bin/trtexec \
-  --onnx=wildfire_detector/resnet_fire_classifier.onnx \
-  --saveEngine=wildfire_detector/resnet_fire_classifier_fp16.trt \
+  --onnx=wildfire_detector/best_model.onnx \
+  --saveEngine=wildfire_detector/best_model_fp16.trt \
   --fp16 \
-  --minShapes=input:1x3x254x254 \ #?
-  --optShapes=input:3x3x254x254 \ #?
-  --maxShapes=input:16x3x254x254 \ #?
-  --shapes=input:1x3x254x254 #?
+  f"--minShapes=input:1x3x{net_model_size}x{net_model_size}", #?
+  f"--optShapes=input:3x3x{net_model_size}x{net_model_size}", #?
+  f"--maxShapes=input:16x3x{net_model_size}x{net_model_size}", #?
+  f"--shapes=input:1x3x{net_model_size}x{net_model_size}" #?
 
 # In order to use RT class replace :
 # from wildfire_detector.function_class_demo import ScanManager

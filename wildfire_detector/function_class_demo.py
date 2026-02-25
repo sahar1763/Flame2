@@ -38,7 +38,7 @@ class ScanManager:
         # === Phase 2 - Loading Model ===
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # Load model from package
-        with pkg_resources.files(__package__).joinpath("resnet_fire_classifier.pt").open("rb") as f:
+        with pkg_resources.files(__package__).joinpath("best_model.pt").open("rb") as f:
             checkpoint = torch.load(f, map_location=torch.device('cpu'), weights_only=True)
 
         # Define model and load state

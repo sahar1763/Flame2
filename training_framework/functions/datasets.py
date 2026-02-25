@@ -49,22 +49,20 @@ def load_image_label_data(images_dir, labels_excel_path):
     # Filter out missing or invalid image files (non-image, wrong extension)
     df = df[df['image_path'].apply(lambda p: os.path.isfile(p) and p.lower().endswith(('.jpg', '.jpeg', '.png')))]
 
-    # Keep rows where at least one of 'fire' or 'smoke' is not NaN
-    df = df.dropna(subset=['fire', 'smoke'], how='all')
+    # Keep rows where 'fire' is not NaN
+    df = df.dropna(subset=['fire'], how='all')
 
-    # Remove rows where fire or smoke have invalid values (not 0 or 1), and convert valid ones to int
+    # Remove rows where fire has invalid values (not 0 or 1), and convert valid ones to int
     df = df[
-        ((df['fire'].isin([0, 1])) | df['fire'].isna()) &
-        ((df['smoke'].isin([0, 1])) | df['smoke'].isna())
+        ((df['fire'].isin([0, 1])) | df['fire'].isna())
         ]
 
     # Fill missing values with 0
     df['fire'] = df['fire'].fillna(0).astype(int)
-    df['smoke'] = df['smoke'].fillna(0).astype(int)
 
-    # Binary label: 1 = Fire (fire or smoke), 0 = No Fire
+    # Binary label: 1 = Fire , 0 = No Fire
     def map_label(row):
-        return 1 if row['fire'] == 1 or row['smoke'] == 1 else 0
+        return 1 if row['fire'] == 1 else 0
 
     df['label'] = df.apply(map_label, axis=1)
 
@@ -77,7 +75,6 @@ def load_image_label_data(images_dir, labels_excel_path):
     image_paths = df['image_path'].tolist()
     labels = df['label'].tolist()
     return image_paths, labels
-
 
 
 def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, config):
@@ -112,8 +109,7 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, con
 
     # Map label
     df['fire'] = df['fire'].fillna(0).astype(int)
-    df['smoke'] = df['smoke'].fillna(0).astype(int)
-    df['label'] = df.apply(lambda row: 1 if row['fire'] == 1 or row['smoke'] == 1 else 0, axis=1)
+    df['label'] = df.apply(lambda row: 1 if row['fire'] == 1 else 0, axis=1)
 
     # ---------- Handle test-only datasets ----------
     test_only_sources = config.get("dataset", {}).get("test_only", [])

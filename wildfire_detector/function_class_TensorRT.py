@@ -476,8 +476,9 @@ class ScanManager:
             str: Path to the .trt engine file inside the package
         """
         package_root = pkg_resources.files("wildfire_detector")
-        onnx_path = str(package_root / "resnet_fire_classifier.onnx")
-        engine_path = str(package_root / "resnet_fire_classifier_fp16.trt")
+        onnx_path = str(package_root / "best_model.onnx")
+        engine_path = str(package_root / "best_model_fp16.trt")
+        net_model_size = self.config['phase2']['net_model_size']
 
         if os.path.exists(engine_path):
             print(f"[TRT] Found existing engine at: {engine_path}")
@@ -490,10 +491,10 @@ class ScanManager:
             f"--onnx={onnx_path}",
             f"--saveEngine={engine_path}",
             "--fp16",
-            "--minShapes=input:1x3x254x254",
-            "--optShapes=input:3x3x254x254",
-            "--maxShapes=input:16x3x254x254",
-            "--shapes=input:1x3x254x254"
+            f"--minShapes=input:1x3x{net_model_size}x{net_model_size}",
+            f"--optShapes=input:3x3x{net_model_size}x{net_model_size}",
+            f"--maxShapes=input:16x3x{net_model_size}x{net_model_size}",
+            f"--shapes=input:1x3x{net_model_size}x{net_model_size}"
         ]
 
         start = time.perf_counter()
