@@ -478,7 +478,7 @@ class ScanManager:
         package_root = pkg_resources.files("wildfire_detector")
         onnx_path = str(package_root / "best_model.onnx")
         engine_path = str(package_root / "best_model_fp16.trt")
-        net_model_size = self.config['phase2']['net_model_size']
+        net_image_size = self.config['phase2']['net_image_size']
 
         if os.path.exists(engine_path):
             print(f"[TRT] Found existing engine at: {engine_path}")
@@ -491,10 +491,10 @@ class ScanManager:
             f"--onnx={onnx_path}",
             f"--saveEngine={engine_path}",
             "--fp16",
-            f"--minShapes=input:1x3x{net_model_size}x{net_model_size}",
-            f"--optShapes=input:3x3x{net_model_size}x{net_model_size}",
-            f"--maxShapes=input:16x3x{net_model_size}x{net_model_size}",
-            f"--shapes=input:1x3x{net_model_size}x{net_model_size}"
+            f"--minShapes=input:1x3x{net_image_size}x{net_image_size}",
+            f"--optShapes=input:3x3x{net_image_size}x{net_image_size}",
+            f"--maxShapes=input:16x3x{net_image_size}x{net_image_size}",
+            f"--shapes=input:1x3x{net_image_size}x{net_image_size}"
         ]
 
         start = time.perf_counter()

@@ -266,15 +266,15 @@ class ScanManager:
         db_runtime = (end2 - start2) * 1000
         print("RUN time:", db_runtime, "[ms]")
 
-        # --- Compute cluster sizes and max values ---
-        cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
-
         print(f"\nlen(image0_centers_pixels): {len(centers_pixels0_org)}\n")
         print(f"len(image1_centers_pixels): {len(image1_centers_pixels)}\n")
 
         # IF no detection, return empty array
         if len(image1_centers_pixels) == 0:
             return []
+
+        # --- Compute cluster sizes and max values ---
+        cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
 
         if len(centers_pixels0_org) > 0:
             # --- Compute image1 cluster descriptors ---
@@ -402,14 +402,14 @@ class ScanManager:
                 'confidence_pct': scores[i],
                 # TODO (Maayan) switch to intensity parameter according to assaf instructions
                 'required_fov2': required_fov2[i]
-            }) # Not similar to real output, ICD is different and output is in pixels and not geo
+            })  # Not similar to real output, ICD is different and output is in pixels and not geo
 
         end = time.perf_counter()
-        print("RUN time (no dbscan):", (end - start) * 1000-db_runtime, "[ms]")
+        print("RUN time (no dbscan):", (end - start) * 1000 - db_runtime, "[ms]")
 
         # Plots of phase1 for debugging
-        plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id) # TODO: Delete later
-        plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100+frame_id) # TODO: Delete later
+        plot_phase1(image1, corners_0, corners_1, centers_pixels, bboxes_pixels, frame_id)  # TODO: Delete later
+        plot_phase1(image0, corners_0, corners_1, centers_pixels, bboxes_pixels, 100 + frame_id)  # TODO: Delete later
 
         return results
 
@@ -563,7 +563,7 @@ class ScanManager:
         package_root = pkg_resources.files("wildfire_detector")
         onnx_path = str(package_root / "best_model.onnx")
         engine_path = str(package_root / "best_model_fp16.trt")
-        net_model_size = self.config['phase2']['net_model_size']
+        net_image_size = self.config['phase2']['net_image_size']
 
         if os.path.exists(engine_path):
             print(f"[TRT] Found existing engine at: {engine_path}")
@@ -576,10 +576,10 @@ class ScanManager:
             f"--onnx={onnx_path}",
             f"--saveEngine={engine_path}",
             "--fp16",
-            f"--minShapes=input:1x3x{net_model_size}x{net_model_size}",
-            f"--optShapes=input:3x3x{net_model_size}x{net_model_size}",
-            f"--maxShapes=input:16x3x{net_model_size}x{net_model_size}",
-            f"--shapes=input:1x3x{net_model_size}x{net_model_size}"
+            f"--minShapes=input:1x3x{net_image_size}x{net_image_size}",
+            f"--optShapes=input:3x3x{net_image_size}x{net_image_size}",
+            f"--maxShapes=input:16x3x{net_image_size}x{net_image_size}",
+            f"--shapes=input:1x3x{net_image_size}x{net_image_size}"
         ]
 
         start = time.perf_counter()

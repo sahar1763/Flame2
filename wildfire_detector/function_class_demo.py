@@ -275,15 +275,15 @@ class ScanManager:
         db_runtime = (end2 - start2) * 1000
         print("RUN time:", db_runtime, "[ms]")
 
-        # --- Compute cluster sizes and max values ---
-        cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
-
         print(f"\nlen(image0_centers_pixels): {len(centers_pixels0_org)}\n")
         print(f"len(image1_centers_pixels): {len(image1_centers_pixels)}\n")
 
         # IF no detection, return empty array
         if len(image1_centers_pixels) == 0:
             return []
+
+        # --- Compute cluster sizes and max values ---
+        cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
 
         if len(centers_pixels0_org) > 0:
             # --- Compute image1 cluster descriptors ---
