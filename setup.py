@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
 
     name='wildfire_detector',
-    version='0.1.5',
+    version='0.1.6', # New Phase1 Pipline, input image dim chagne to derive from config
     packages=find_packages(),
 
     install_requires=[

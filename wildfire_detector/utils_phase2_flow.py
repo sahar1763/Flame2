@@ -121,26 +121,26 @@ def predict_crops_majority_vote(crops, model, bbox, device,
                                 original_image=None,
                                 crops_np=None,
                                 plot=False):
+
     label_names = {0: "No Fire", 1: "Fire"}
-
     times = {}
-
     t0 = time.perf_counter()
     model.eval()
 
-# Protection if there are no crops
-    if len(crops) == 0:
+    # Protection if there are no crops
+    if (isinstance(crops, list) and len(crops) == 0) or (torch.is_tensor(crops) and crops.nelement() == 0):
         return "No Fire", 0.0
 
-    # Stage 1: Stack crops
+    # Prepare Batch and Move to Device
     t1 = time.perf_counter()
-    batch = torch.stack(crops)
-    times['stack'] = time.perf_counter() - t1
 
-    # Stage 2: Move to device
-    t2 = time.perf_counter()
-    batch = batch.to(device)
-    times['to_device'] = time.perf_counter() - t2
+    if isinstance(crops, list):
+        # Old way: list of tensors
+        batch = torch.stack(crops).to(device)
+    else:
+        batch = crops.to(device)
+
+    times['prepare_batch'] = time.perf_counter() - t1
 
     # # Stage 3: Inference
     # t3 = time.time()
@@ -226,17 +226,20 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
     t0 = time.perf_counter()
 
     # Protection if there are no crops
-    if len(crops) == 0:
+    if (isinstance(crops, list) and len(crops) == 0) or (torch.is_tensor(crops) and crops.nelement() == 0):
         return "No Fire", 0.0
 
-    # Stage 1: Stack crops (Torch -> one batch tensor)
+    # Stage 1: Handle Batch
     t1 = time.perf_counter()
-    batch = torch.stack(crops)  # (N,C,H,W)
+    if isinstance(crops, list):
+        batch = torch.stack(crops)
+    else:
+        batch = crops  # It's already a stacked tensor!
     times['stack'] = time.perf_counter() - t1
 
     # Stage 2: Convert to NumPy (TensorRT expects np.float32)
     t2 = time.perf_counter()
-    np_batch = batch.cpu().numpy().astype(np.float32)  # (N,C,H,W)
+    np_batch = batch.detach().cpu().numpy().astype(np.float32)  # (N,C,H,W)
     times['to_numpy'] = time.perf_counter() - t2
 
     # Stage 3: Inference with TensorRT

@@ -487,26 +487,34 @@ class ScanManager:
         crop_factors = self.config['phase2']['crop_factors']
         image_size = self.config['phase2']['net_image_size']
 
-        transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
-        ])
-
+        # Convert and Resize INDIVIDUALLY to ensure they match
+        resized_tensors = []
         cropped_images_np = []
-        test_tensors = []
-
         for crop_factor in crop_factors:
-            # Crop the image (NumPy RGB)
-            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=self.config['phase2']['net_image_size'])
-            cropped_images_np.append(cropped_np)  # Save for plotting
 
-            # Convert to PIL and apply transforms
-            pil_img = Image.fromarray(cropped_np)
-            test_tensors.append(transform(pil_img))
+            cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=image_size)
+            cropped_images_np.append(cropped_np)
 
-        test_tensors = [t for t in test_tensors if t.numel() > 0]
+            # NumPy [H, W, C] -> Tensor [C, H, W]
+            t = torch.from_numpy(cropped_np).permute(2, 0, 1).float()
+
+            # Resize all tensors (3, image_size, image_size)
+            t = torch.nn.functional.interpolate(
+                t.unsqueeze(0),
+                size=(image_size, image_size),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(0)
+
+            resized_tensors.append(t)
+
+        test_tensors = torch.stack(resized_tensors)  # Shape: [3, 3, image_size, image_size]
+
+        # Final Normalization (Vectorized and Fast)
+        test_tensors.div_(255.0)
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        test_tensors = (test_tensors - mean) / std
 
         total_time = time.perf_counter() - tt0
         print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
