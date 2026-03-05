@@ -4,7 +4,8 @@ import yaml
 import os
 import importlib.resources as pkg_resources
 import numpy as np
-
+import time
+import requests
 from typing import List, Tuple, Optional, Iterable, Dict, Any
 import httpx
 
@@ -31,6 +32,10 @@ class ScanManager:
         # === Phase 0 ===
         self.frames = {}    # frame_id: frame
         self.corners = {}   # frame_id: corners. Format: [top-left, top-right, bottom-right, bottom-left]
+        self.centers_pixels0 = {}
+        self.cluster_info0 = {}
+        self.cluster_descriptors0 = {}
+
         ir_height, ir_width = self.config['image']['ir_size']
         self.points0_arrange = generate_uniform_grid(ir_height, ir_width, points_num=self.config['grid']['points_per_frame'])
 
@@ -94,9 +99,6 @@ class ScanManager:
 
             self.dummy_md["investigation_parameters"]["detected_bounding_box"] = dummy_bbox
 
-            if self.device.type == 'cuda':
-                torch.cuda.synchronize()
-
             self.warmup = True # BBox input in warmup is in pixels, skip using geo2pix conversion
             for i in range(self.config["warmup"]["num_iterations"]):
                 _ = self.phase2(dummy_img, self.dummy_md)
@@ -136,6 +138,62 @@ class ScanManager:
         # === Step 5: Save result ===
         self.corners[frame_id] = ground_corners  # ndarray(N, 3)
 
+        # === Step 6: Clustering ===
+        drone_height = metadata["uav"]["altitude_agl_meters"]  # [m]
+        projection_angle = camera_angle_from_vertical(
+            platform_roll_deg=metadata["uav"]["roll_deg"],
+            platform_pitch_deg=metadata["uav"]["pitch_deg"],
+            platform_yaw_deg=metadata["uav"]["yaw_deg"],
+            sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
+            sensor_elevation_deg=metadata["payload"]["elevation_deg"],
+        )  # angle regarding the world
+
+        # IF camera is almost horizontal
+        if projection_angle > 89:
+            return []
+
+        hfov = metadata["payload"]["field_of_view_deg"]  # [deg]
+        # Fire Max Size (length)
+        fire_size = self.config['fire']['max_size_m']  # [m]
+        # Important Calculation
+        ir_height, ir_width = self.config['image']['ir_size']
+        Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
+        IFOV = hfov / ir_width / 180 * np.pi  # Instantaneous Field of View [urad]
+        GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
+        fire_length_pixel = np.max([np.floor(fire_size / GSD),1]) # if expected fire below 1 pixel search for fire of at least 1 pixel
+
+        # Compute DBSCAN parameters based on estimated fire characteristics
+        min_samples_factor = self.config['dbscan']['min_samples_factor']
+        eps_distance_factor = self.config['dbscan']['eps_distance_factor']
+        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2)*np.sqrt(eps_distance_factor))),1,10)) # Need to verify that expected pixels are within the radius
+        min_samples = int(np.floor(min_samples_factor * eps_distance ** 2))
+
+        # Preprocess, compare, cluster, and score
+        image0 = preprocess_images(frame, applying=self.config['preprocessing']['apply'])
+        image0_centers_pixels, image0_label_map, image0_bboxes_pixels = find_cluster_centers_conditional(
+            diff_map=image0,
+            threshold=self.config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
+            eps=eps_distance,  # Clustering radius
+            min_samples=min_samples,  # Minimum number of points in cluster
+            min_contrast=self.config['dbscan']['min_contrast']  # Contrast-based center selection
+        )
+
+        if len(image0_centers_pixels) > 0:
+            cluster_info_img0 = compute_cluster_size_maxval(image0_label_map, frame, GSD)
+            # --- Compute cluster descriptors ---
+            final_descriptors_img0, _ = extract_orb_descriptors(
+                image=image0,
+                cluster_centers=image0_centers_pixels,
+                patch_size_px=fire_length_pixel
+            )
+        else:
+            cluster_info_img0 = []
+            final_descriptors_img0 = []
+
+        self.centers_pixels0[frame_id] = image0_centers_pixels
+        self.cluster_info0[frame_id] = cluster_info_img0
+        self.cluster_descriptors0[frame_id] = final_descriptors_img0
+
     def phase1(self, image1: np.ndarray, metadata: dict):
         """
         Process a new IR frame using stored Scan0 reference.
@@ -148,17 +206,13 @@ class ScanManager:
             platform_yaw_deg=metadata["uav"]["yaw_deg"],
             sensor_azimuth_deg=metadata["payload"]["azimuth_deg"],
             sensor_elevation_deg=metadata["payload"]["elevation_deg"],
-        )  # angle regarding to world
+        )  # angle regarding the world
 
         # IF camera is almost horizontal
         if projection_angle > 89:
             return []
 
         hfov = metadata["payload"]["field_of_view_deg"]  # [deg]
-
-        # Load scan0 image and corners
-        image0 = self.frames[frame_id]
-        corners_0 = self.corners[frame_id]  # at world coordinates  # lat, lon, alt
 
         # Fire Max Size (length)
         fire_size = self.config['fire']['max_size_m']  # [m]
@@ -172,7 +226,8 @@ class ScanManager:
         IFOV = hfov / ir_width / 180 * np.pi  # Instantaneous Field of View [urad]
         GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
 
-        fire_length_pixel = np.max([np.floor(fire_size / GSD),1]) # if expected fire below 1 pixel search for fire of at least 1 pixel
+        fire_length_pixel = np.max(
+            [np.floor(fire_size / GSD), 1])  # if expected fire below 1 pixel search for fire of at least 1 pixel
         fire_num_pixel = fire_length_pixel ** 2
 
         # FOV calc for Phase 2
@@ -184,42 +239,23 @@ class ScanManager:
         # Prepare transformation matrix
         flatten_transformation_matrix = metadata["geolocation"]["transformation_matrix"]  # should be List Length=16
 
-        # Get image resolution for normalization
-        ir_height, ir_width = self.config['image']['ir_size']
-
-        # --- Geo → normalized pixel coordinates in image-1 ---
-        pixels_norm = self.detector_client.georeg_latlon_to_pixels_batch(
-            transf16=flatten_transformation_matrix,
-            coords_latlon_alt=corners_0
-        )  # shape (N,2) -> [y_norm, x_norm]
-
-        # --- Normalized → IR image pixel coordinates ---
-        pixels_img0_at_img1 = np.zeros_like(pixels_norm, dtype=np.float32)
-        pixels_img0_at_img1[:, 0] = pixels_norm[:, 0] * (ir_height - 1)  # y
-        pixels_img0_at_img1[:, 1] = pixels_norm[:, 1] * (ir_width - 1)  # x
-
-        pts_image = self.points0_arrange
-
-        homography_mat = create_homography(pts_image, pixels_img0_at_img1)
-
-        # Warp image0 to image1 frame
-        image0_proj = cv2.warpPerspective(image0, homography_mat, (image1.shape[1], image1.shape[0]),
-                                          cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
-                                          borderValue=np.median(image0))
+        # Load scan0 image and info
+        image0 = self.frames[frame_id]
+        corners_0 = self.corners[frame_id]  # at world coordinates  # lat, lon, alt
+        centers_pixels0_org = self.centers_pixels0[frame_id]
+        cluster_info_img0 = self.cluster_info0[frame_id]
+        final_descriptors_img0 = self.cluster_descriptors0[frame_id]
 
         # Preprocess, compare, cluster, and score
-        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
-        diff_map = compute_positive_difference(image0_proj, image1)
-        diff_map = postprocess_difference_map(diff_map, image1, threshold=self.config['postprocessing']['threshold'],
-                                              temp_threshold=self.config['postprocessing']['temp_threshold'])
-
+        image1 = preprocess_images(image1, applying=self.config['preprocessing']['apply'])
         # Step 1: Compute DBSCAN parameters based on estimated fire characteristics
-        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2)* np.sqrt(eps_distance_factor))),1,10)) # Need to verify that expected pixels are within the radius
+        eps_distance = int(np.clip((np.floor((fire_length_pixel / 2) * np.sqrt(eps_distance_factor))), 1,
+                                   10))  # Need to verify that expected pixels are within the radius
         min_samples = int(np.floor(min_samples_factor * eps_distance ** 2))
         # Step 2: Run conditional DBSCAN clustering to identify potential fire regions
         # === Phase 1: Clustering ===
-        centers_pixels, label_map, bboxes_pixels = find_cluster_centers_conditional(
-            diff_map=diff_map,
+        image1_centers_pixels, image1_label_map, image1_bboxes_pixels = find_cluster_centers_conditional(
+            diff_map=image1,
             threshold=self.config['dbscan']['diff_threshold'],  # Only consider pixels with diff > diff_threshold
             eps=eps_distance,  # Clustering radius
             min_samples=min_samples,  # Minimum number of points in cluster
@@ -227,14 +263,91 @@ class ScanManager:
         )
 
         # IF no detection, return empty array
-        if len(centers_pixels) == 0:
+        if len(image1_centers_pixels) == 0:
             return []
+
+        # --- Compute cluster sizes and max values ---
+        cluster_info_img1 = compute_cluster_size_maxval(image1_label_map, image1, GSD)
+
+        if len(centers_pixels0_org) > 0:
+            # --- Compute image1 cluster descriptors ---
+            final_descriptors_img1, _ = extract_orb_descriptors(
+                image=image1,
+                cluster_centers=image1_centers_pixels,
+                patch_size_px=fire_length_pixel
+            )
+
+            # Get image resolution for normalization
+            ir_height, ir_width = self.config['image']['ir_size']
+
+            # --- Geo → normalized pixel coordinates in image-1 ---
+            pixels_norm = self.detector_client.georeg_latlon_to_pixels_batch(
+                transf16=flatten_transformation_matrix,
+                coords_latlon_alt=corners_0
+            )  # shape (N,2) -> [y_norm, x_norm]
+
+            # --- Normalized → IR image pixel coordinates ---
+            pixels_img0_at_img1 = np.zeros_like(pixels_norm, dtype=np.float32)
+            pixels_img0_at_img1[:, 0] = pixels_norm[:, 0] * (ir_height - 1)  # y
+            pixels_img0_at_img1[:, 1] = pixels_norm[:, 1] * (ir_width - 1)  # x
+
+            pts_image = self.points0_arrange
+
+            homography_mat = create_homography(pts_image, pixels_img0_at_img1)
+
+            # Project image0 points to image1 coordinates
+            centers_pixels0_array = np.array(centers_pixels0_org)
+            image0_centers_pixels = project_points_with_homography(centers_pixels0_array, homography_mat).tolist()
+
+            # --- Build cluster dictionaries with descriptors and metadata ---
+            clusters_phase0 = {}
+            for idx, center in enumerate(image0_centers_pixels):
+                clusters_phase0[idx] = {
+                    "center": center,
+                    "descriptor": final_descriptors_img0[idx] if final_descriptors_img0 is not None else None,
+                    "area": cluster_info_img0.get(idx, {}).get("size", 1),
+                    "max_val": cluster_info_img0.get(idx, {}).get("max_val", 0.0)
+                }
+
+            clusters_phase1 = {}
+            for idx, center in enumerate(image1_centers_pixels):
+                clusters_phase1[idx] = {
+                    "center": center,
+                    "descriptor": final_descriptors_img1[idx] if final_descriptors_img1 is not None else None,
+                    "area": cluster_info_img1.get(idx, {}).get("size", 1),
+                    "max_val": cluster_info_img1.get(idx, {}).get("max_val", 0.0)
+                }
+
+            # --- Compute the cost matrix ---
+            cost_matrix = compute_cluster_cost_matrix(
+                clusters_phase1,
+                clusters_phase0,
+                gsd=GSD,
+                config=self.config,
+            )
+
+            # --- Hungarian matching ---
+            unmatched_mask, _ = match_clusters_hungarian(cost_matrix)
+
+            # --- Filter phase1 data based on matches ---
+            centers_pixels, bboxes_pixels, cluster_info_filtered = filter_unmatched_clusters(
+                unmatched_mask,
+                image1_centers_pixels,
+                image1_bboxes_pixels,
+                cluster_info_img1
+            )
+
+            # IF no detection, return empty array
+            if len(centers_pixels) == 0:
+                return []
+        else:
+            centers_pixels = image1_centers_pixels
+            cluster_info_filtered = cluster_info_img1
+            bboxes_pixels = image1_bboxes_pixels
 
         # === Compute scores ===
         scores = compute_cluster_scores(
-            label_map,
-            image1,
-            GSD,
+            cluster_info_filtered,
             norm_size=self.config['scoring']['norm_size'],
             norm_intensity=self.config['scoring']['norm_intensity'],
             weights=self.config['scoring']['scaling_weights'],
