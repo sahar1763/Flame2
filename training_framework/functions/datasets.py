@@ -77,7 +77,7 @@ def load_image_label_data(images_dir, labels_excel_path):
     return image_paths, labels
 
 
-def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, config):
+def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, config, rank=0, world_size=1):
     # Set random seed for reproducibility
     random_seed = 42
     torch.manual_seed(random_seed)
@@ -122,25 +122,38 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, con
         remaining_df, test_size=val_ratio, stratify=remaining_df['label'], random_state=random_seed
     )
 
-    # Weighted sampling for train
-    class_counts = np.bincount(train_df['label'])
-    class_weights = 1. / torch.tensor(class_counts, dtype=torch.float)
-    sample_weights = [class_weights[label] for label in train_df['label']]
-    sampler = WeightedRandomSampler(sample_weights, num_samples=len(train_df), replacement=True)
+    # Calculate this just to know the number of output nodes
+    num_classes = len(np.unique(train_df['label']))
 
     # Create datasets
     train_dataset = FireSmokeDatasetFromLists(train_df['image_path'].tolist(), train_df['label'].tolist(), transform=train_transform)
     val_dataset = FireSmokeDatasetFromLists(val_df['image_path'].tolist(), val_df['label'].tolist(), transform=test_transform)
     test_dataset = FireSmokeDatasetFromLists(test_df['image_path'].tolist(), test_df['label'].tolist(), transform=test_transform)
 
+    # Distributed Sampler handles splitting data across the 8 GPUs
+    # Note: Using standard DistributedSampler here.
+    # For weighted distributed sampling, specialized custom classes are usually needed.
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset, num_replicas=world_size, rank=rank, shuffle=True
+    )
+    # We also create samplers for validation and test to ensure consistent data handling
+    val_sampler = torch.utils.data.distributed.DistributedSampler(
+        val_dataset, num_replicas=world_size, rank=rank, shuffle=False
+    )
+    test_sampler = torch.utils.data.distributed.DistributedSampler(
+        test_dataset, num_replicas=world_size, rank=rank, shuffle=False
+    )
+    print(f"world_size: {world_size}")
+    print(f"rank: {rank}")
+
     # Create loaders
     dataloader_params = config.get("dataloader", {})
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, **dataloader_params)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, **dataloader_params)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, **dataloader_params)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, **dataloader_params)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, **dataloader_params)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler, **dataloader_params)
 
     print(f"Train size: {len(train_dataset)}")
     print(f"Validation size: {len(val_dataset)}")
     print(f"Test size: {len(test_dataset)} (includes test-only datasets)")
 
-    return train_loader, val_loader, test_loader, len(class_counts)
+    return train_loader, val_loader, test_loader, num_classes

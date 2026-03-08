@@ -11,6 +11,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchvision import models
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import numpy as np
 import wandb
 
@@ -27,12 +29,24 @@ def set_seed(seed: int = 42):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 # ===================== Main =====================
 def main(config_path: str):
+
+    # Get environment variables set by torchrun
+    rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    # Initialize the "handshake" between GPUs
+    dist.init_process_group(backend="nccl", init_method="env://")
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+
+    # Only the first process (rank 0) does the "office work"
+    is_master = (rank == 0)
 
     # ---------- Load Config ----------
     with open(config_path, "r", encoding="utf-8") as f:
@@ -47,36 +61,39 @@ def main(config_path: str):
     checkpoints_dir = os.path.join(experiment_dir, "checkpoints")
     plots_dir = os.path.join(experiment_dir, "plots")
 
-    os.makedirs(logs_dir, exist_ok=True)
-    os.makedirs(checkpoints_dir, exist_ok=True)
-    os.makedirs(plots_dir, exist_ok=True)
+    if is_master:
+        os.makedirs(logs_dir, exist_ok=True)
+        os.makedirs(checkpoints_dir, exist_ok=True)
+        os.makedirs(plots_dir, exist_ok=True)
 
-    # Save config copy
-    shutil.copy(config_path, os.path.join(experiment_dir, "config.yaml"))
+        # Save config copy
+        shutil.copy(config_path, os.path.join(experiment_dir, "config.yaml"))
 
     # ---------- Logging ----------
     log_path = os.path.join(logs_dir, "train.log")
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.FileHandler(log_path),
-            logging.StreamHandler()
-        ]
-    )
+    if is_master:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+            handlers=[
+                logging.FileHandler(log_path),
+                logging.StreamHandler()
+            ]
+        )
 
-    logging.info(f"Experiment directory: {experiment_dir}")
-    logging.info(f"Using config file: {config_path}")
+        logging.info(f"Experiment directory: {experiment_dir}")
+        logging.info(f"Using config file: {config_path}")
+    else:
+        logging.basicConfig(level=logging.ERROR)
 
     # ---------- Reproducibility ----------
     seed = config.get("seed", 42)
     set_seed(seed)
-    logging.info(f"Seed set to: {seed}")
+    if is_master:
+        logging.info(f"Seed set to: {seed}")
+        logging.info(f"Using device: {device}")
 
-    # ---------- Device ----------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info(f"Using device: {device}")
 
     # ---------- Dataset Params ----------
     images_dir = config["dataset"]["images_dir"]
@@ -93,12 +110,15 @@ def main(config_path: str):
     wandb_entity = config["wandb"]["entity"]
     wandb_project = config["wandb"]["project"]
 
-    run = wandb.init(
-        entity=wandb_entity,
-        project=wandb_project,
-        name=f"{timestamp}_{model_name}",
-        config=config,
-    )
+    if is_master:
+        run = wandb.init(
+            entity=wandb_entity,
+            project=wandb_project,
+            name=f"{timestamp}_{model_name}",
+            config=config,
+        )
+    else:
+        run = None  # Other GPUs don't need a WandB handle
 
     # ---------- Prepare Dataloaders ----------
     train_loader, val_loader, test_loader, num_classes = prepare_dataloaders(
@@ -106,10 +126,12 @@ def main(config_path: str):
         images_dir=images_dir,
         labels_csv_path=labels_csv_path,
         batch_size=batch_size,
-        config=config
+        config=config,
+        rank=rank,
+        world_size=world_size
     )
 
-    logging.info(f"Number of classes: {num_classes}")
+
 
     # ---------- Initialize Model ----------
     model_name = config["training"]["model_name"]
@@ -127,13 +149,20 @@ def main(config_path: str):
 
     model = model.to(device)
 
-    logging.info(f"Model: {model_name}")
-    logging.info(f"Learning rate: {lr}")
-    logging.info(f"Batch size: {batch_size}")
-    logging.info(f"Epochs: {num_epochs}")
+    # Wrap model to synchronize gradients across GPUs
+    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)  # Syncs Batch Norm layers
+    model = DDP(model, device_ids=[rank])
+
+    if is_master:
+        logging.info(f"Number of classes: {num_classes}")
+        logging.info(f"Model: {model_name}")
+        logging.info(f"Learning rate: {lr}")
+        logging.info(f"Batch size: {batch_size}")
+        logging.info(f"Epochs: {num_epochs}")
 
     # ---------- Loss & Optimizer ----------
-    loss_fn = nn.CrossEntropyLoss()
+    weights = torch.tensor([7.0, 3.0]).cuda()
+    loss_fn = nn.CrossEntropyLoss(weight=weights)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # ---------- Trainer ----------
@@ -141,13 +170,14 @@ def main(config_path: str):
         model,
         loss_fn,
         optimizer,
-        use_wandb=True,
+        use_wandb=is_master,
         wandb_run=run,
-        device=device
+        device=device,
+        is_master=is_master,
     )
 
     # ---------- Training ----------
-    checkpoint_path = os.path.join(checkpoints_dir, "best_model")
+    checkpoint_path = os.path.join(checkpoints_dir, config["checkpoint"]["path"])
 
     fit_res = trainer.fit(
         train_loader,
@@ -157,22 +187,26 @@ def main(config_path: str):
         checkpoints=checkpoint_path,
     )
 
-    logging.info("Training completed successfully.")
+    if is_master:
+        logging.info("Training completed successfully.")
 
-    # ---------- Save Plot ----------
-    fig, axes = plot_fit(fit_res)
-    plot_path = os.path.join(plots_dir, "fit.png")
-    fig.savefig(plot_path)
-    logging.info(f"Saved training plot to {plot_path}")
+        # ---------- Save Plot ----------
+        fig, axes = plot_fit(fit_res)
+        plot_path = os.path.join(plots_dir, "fit.png")
+        fig.savefig(plot_path)
+        logging.info(f"Saved training plot to {plot_path}")
 
-    # ---------- Save Best Metrics to W&B ----------
-    if fit_res.val_acc:
-        run.summary["best_val_acc"] = max(fit_res.val_acc)
-    if fit_res.test_acc:
-        run.summary["best_test_acc"] = max(fit_res.test_acc)
+        # ---------- Save Best Metrics to W&B ----------
+        if fit_res.val_acc:
+            run.summary["best_val_acc"] = max(fit_res.val_acc)
+        if fit_res.test_acc:
+            run.summary["best_test_acc"] = max(fit_res.test_acc)
 
-    run.finish()
-    logging.info("W&B run finished.")
+        run.finish()
+        logging.info("W&B run finished.")
+
+    # Cleanly exit the distributed group
+    dist.destroy_process_group()
 
 
 # ===================== Entry Point =====================

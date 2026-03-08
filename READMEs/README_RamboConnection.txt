@@ -32,6 +32,8 @@ rm filename.py
 
 remove all files from folder:
 rm -rf *
+remove specific folder:
+rm -rf folder_name
 remove folder:
 rmdir folder_name
 
@@ -49,8 +51,12 @@ python3 -m zipfile -e source_folder.zip destination_folder
 
 move all files one previous folder in path:
 mv * ..
+if there are many files this also could work:
+find . -mindepth 1 -maxdepth 1 -exec mv -t .. {} +
+move file:
+mv filename.py new_path
 
-change dir name:
+change dir path:
 mv old_name new_name
 
 edit python file:
@@ -64,3 +70,9 @@ scp -r "STAFF\saharc@132.68.36.227:/home/saharc/folder_name" .
 
 validate folder size:
 du -sh UnifiedDataset
+
+Training run cmd
+all gpus
+torchrun --nproc_per_node=8 train.py --config configTrainModel.yaml
+part of gpus
+CUDA_VISIBLE_DEVICES=2,4,6 torchrun --nproc_per_node=3 train.py --config configTrainModel.yaml
