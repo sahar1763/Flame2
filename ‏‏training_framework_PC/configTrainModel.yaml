@@ -1,0 +1,32 @@
+dataset:
+  images_dir: "../UnifiedDataset"
+  labels_csv: "../UnifiedDataset/labels.csv"
+  image_size: 224
+  val_ratio: 0.4
+  test_only:
+    - FLAME_2
+
+#dataloader:
+#  pin_memory: true
+#  prefetch_factor: 4
+#  num_workers: 12
+#  persistent_workers: true
+
+training:
+  model_name: "resnet18"
+  lr: 0.0001
+  weight_decay: 0.0001
+  batch_size: 5
+  num_epochs: 5
+  early_stopping: 10
+  print_every: 1
+  max_batches_per_epoch: 100
+  update_lr_epoch_num: 3
+  lr_factor: 0.5
+
+wandb:
+  entity: "WildFire_Detector"
+  project: "Phase2_ResNet18"
+
+checkpoint:
+  path: "best_model"

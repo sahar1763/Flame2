@@ -1,0 +1,238 @@
+import time
+import os
+import torch
+import torch.nn as nn
+from torch.optim import Optimizer
+from collections import namedtuple
+from tqdm import tqdm, trange
+
+import wandb
+
+from sklearn.metrics import classification_report, confusion_matrix
+import pandas as pd
+
+# Creating a class to store the results
+TrainingResults = namedtuple('TrainingResults', ['train_loss', 'val_loss', 'test_loss', 'train_acc', 'val_acc', 'test_acc'])
+
+
+class Trainer:
+    def __init__(self, model, loss_fn, optimizer, use_wandb = False, wandb_run = None, device="cpu"):
+        self.model = model.to(device)
+        self.loss_fn = loss_fn
+        self.optimizer = optimizer
+        self.device = device
+
+        # W&B integration
+        self.use_wandb = use_wandb
+        self.wandb_run = wandb_run
+
+        if self.use_wandb and self.wandb_run is not None:
+            self.wandb_run.watch(self.model, log="all", log_freq=100)
+
+    def train_batch(self, batch):
+        raise NotImplementedError()
+
+    def test_batch(self, batch):
+        raise NotImplementedError()
+
+    def fit(self, dl_train, dl_val, dl_test, config, checkpoints = None):
+
+        update_lr_epoch_num = config["training"]["update_lr_epoch_num"]
+        lr_factor = config["training"]["lr_factor"]
+        num_epochs = config["training"]["num_epochs"]
+        early_stopping = config["training"]["early_stopping"]
+        print_every = config["training"]["print_every"]
+        max_batches_per_epoch = config["training"]["max_batches_per_epoch"]
+
+        best_acc = None
+        epochs_without_improvement = 0
+        checkpoint_path = f"{checkpoints}.pt" if checkpoints else None
+
+        train_loss, train_acc = [], []
+        val_loss, val_acc = [], []
+        test_loss, test_acc = [], []
+
+        # Load checkpoint if it exists
+        if checkpoint_path and os.path.isfile(checkpoint_path):
+            print(f"*** Loading checkpoint file from {checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                self.model.load_state_dict(checkpoint["model_state"])
+
+                if "optimizer_state" in checkpoint:
+                    self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+                
+                best_acc = checkpoint.get("best_acc", best_acc)
+                epochs_without_improvement = checkpoint.get("ewi", epochs_without_improvement)
+            except Exception as e:
+                print(f"Failed loading checkpoint due to: {e}")
+
+        # Train loop
+        print("Start training")
+        for epoch in trange(num_epochs, desc="Epochs"): #, leave=False): #range(num_epochs): #
+            self.model.train()
+            train_result = self._run_epoch(dl_train, train=True, max_batches=max_batches_per_epoch)
+            train_loss.extend(train_result["loss"])
+            train_acc.append(train_result["accuracy"])
+
+            self.model.eval()
+            val_result = self._run_epoch(dl_val, train=False, max_batches=max_batches_per_epoch)
+            val_loss.extend(val_result["loss"])
+            val_acc.append(val_result["accuracy"])
+
+            test_result = self._run_epoch(dl_test, train=False, max_batches=max_batches_per_epoch)
+            test_loss.extend(test_result["loss"])
+            test_acc.append(test_result["accuracy"])
+
+            # Print statistics
+            if epoch % print_every == 0 or epoch == num_epochs - 1:
+                print(f"--- EPOCH {epoch + 1}/{num_epochs} ---")
+                print(f"  Train Loss: {train_result['loss'][0]:.4f} | Train Acc: {train_result['accuracy']:.2f}%")
+                print(f"  Val Loss: {val_result['loss'][0]:.4f} | Val Acc: {val_result['accuracy']:.2f}%")
+                print(f"  Test Loss: {test_result['loss'][0]:.4f} | Test Acc: {test_result['accuracy']:.2f}%")
+
+            # ---------- W&B LOGGING (NEW) ----------
+            if self.use_wandb and self.wandb_run is not None:
+                # Grab current LR (assumes single param group)
+                current_lr = self.optimizer.param_groups[0]["lr"]
+
+                self.wandb_run.log(
+                    {
+                        "epoch": epoch + 1,
+                        "train/loss": train_result["loss"][0],
+                        "train/acc": train_result["accuracy"],
+                        "val/loss": val_result["loss"][0],
+                        "val/acc": val_result["accuracy"],
+                        "test/loss": test_result["loss"][0],
+                        "test/acc": test_result["accuracy"],
+                        "lr": current_lr,
+                    },
+                    step=epoch + 1,
+                )
+
+            # Early Stopping Check
+            if best_acc is None or val_result["accuracy"] > best_acc:
+                best_acc = val_result["accuracy"]
+                checkpoint_test_acc = test_result["accuracy"]
+                epochs_without_improvement = 0
+                if checkpoint_path:
+                    torch.save({
+                        "model_state": self.model.state_dict(),
+                        "optimizer_state": self.optimizer.state_dict(),  # כדאי להוסיף
+                        "best_acc": best_acc,
+                        "checkpoint_test_acc": checkpoint_test_acc,
+                        "ewi": epochs_without_improvement
+                    }, checkpoint_path)
+                    
+                    print(f"*** Saved checkpoint at epoch {epoch+1}")
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement % update_lr_epoch_num == 0:
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] *= lr_factor
+                        new_lr = param_group['lr']
+                    print(f"Reducing learning rate to {new_lr:.6e}")
+                if early_stopping and epochs_without_improvement >= early_stopping:
+                    print(f"*** Early stopping at epoch {epoch + 1} ***")
+                    break
+
+        # =============== Confusion Matrix ===============
+        y_true, y_pred = [], []
+        self.model.eval()
+        with torch.no_grad():
+            for X, y, _ in dl_test:
+                X, y = X.to(self.device), y.to(self.device)
+                preds = self.model(X).argmax(dim=1)
+                y_true.extend(y.cpu().numpy())
+                y_pred.extend(preds.cpu().numpy())
+
+        if checkpoint_path:
+            results_dir = os.path.join(os.path.dirname(checkpoint_path), "results")
+            os.makedirs(results_dir, exist_ok=True)
+
+        # --- Confusion matrix ---
+        cm = confusion_matrix(y_true, y_pred)
+        cm_df = pd.DataFrame(cm, index=["No Fire", "Fire"], columns=["Pred No Fire", "Pred Fire"])
+        print("\n*** Confusion Matrix ***")
+        print(cm_df)
+
+        # --- Save confusion matrix ---
+        cm_csv_path = os.path.join(results_dir, "confusion_matrix.csv")
+        cm_df.to_csv(cm_csv_path)
+        print(f"Saved confusion matrix to {cm_csv_path}")
+
+        # --- Classification report ---
+        report = classification_report(y_true, y_pred, target_names=["No Fire", "Fire"], output_dict=True)
+        report_df = pd.DataFrame(report).transpose()
+        print("\n*** Classification Report ***")
+        print(report_df)
+
+        # --- Save classification report ---
+        report_csv_path = os.path.join(results_dir, "classification_report.csv")
+        report_df.to_csv(report_csv_path)
+        print(f"Saved classification report to {report_csv_path}")
+
+
+        return TrainingResults(
+            train_loss=train_loss,
+            val_loss=val_loss,
+            test_loss=test_loss,
+            train_acc=train_acc,
+            val_acc=val_acc,
+            test_acc=test_acc
+        )
+
+
+    def _run_epoch(self, dl, train, max_batches=None):
+        total_loss, total_correct, total_samples = 0.0, 0, 0
+    
+        # Set description for progress bar
+        desc = "Training" if train else "Evaluating"
+    
+        # Create tqdm iterator
+        loop = tqdm(enumerate(dl), total=len(dl), desc=desc) #, leave=False)
+    
+        for i, batch in loop:
+            if max_batches is not None and i >= max_batches:
+                break
+    
+            batch_result = self.train_batch(batch) if train else self.test_batch(batch)
+            batch_size = len(batch[1])
+    
+            total_loss += batch_result["loss"] * batch_size
+            total_correct += batch_result["accuracy"] * batch_size
+            total_samples += batch_size
+    
+            # Optional: update tqdm postfix with running stats
+            loop.set_postfix({
+                "Loss": f"{total_loss / max(total_samples, 1):.4f}",
+                "Acc": f"{100 * total_correct / max(total_samples, 1):.2f}%"
+            })
+    
+        return {
+            "loss": [total_loss / total_samples],
+            "accuracy": 100 * total_correct / total_samples
+        }
+
+
+class ClassificationGuidedEncoding(Trainer):
+    def train_batch(self, batch):
+        X, y, _ = batch
+        X, y = X.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
+        self.optimizer.zero_grad()
+        predictions = self.model(X)
+        loss = self.loss_fn(predictions, y)
+        loss.backward()
+        self.optimizer.step()
+
+        num_correct = (predictions.argmax(dim=1) == y).sum().item()
+        return {"loss": loss.item(), "accuracy": num_correct / len(y)}
+
+    def test_batch(self, batch):
+        X, y, _ = batch
+        X, y = X.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            predictions = self.model(X)
+            loss = self.loss_fn(predictions, y)
+            num_correct = (predictions.argmax(dim=1) == y).sum().item()
+        return {"loss": loss.item(), "accuracy": num_correct / len(y)}
