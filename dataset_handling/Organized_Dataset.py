@@ -2,6 +2,9 @@ import os
 import shutil
 import pandas as pd
 import csv
+from PIL import Image
+from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
 
 
 def split_by_dataset_fire(source_images_dir, source_csv_path, output_root_dir):
@@ -327,14 +330,41 @@ def process_dataset(source_root, dest_root):
     print(f"Success! Copied {files_copied} images.")
 
 
+def _process_single_image(args):
+    """Internal helper function for parallel processing."""
+    old_path, new_path, target_size = args
+    try:
+        if target_size is not None:
+            with Image.open(old_path) as img:
+                # High-quality Lanczos resize
+                resized_img = img.resize(target_size, Image.Resampling.LANCZOS)
+                # Convert to RGB (standard for ML) and save as JPEG
+                resized_img.convert("RGB").save(new_path, "JPEG", quality=90)
+        else:
+            # If image_size is None, just copy the original file
+            shutil.copy2(old_path, new_path)
+        return True
+    except Exception as e:
+        return f"Error on {old_path}: {e}"
+
+
 def create_unified_dataset(
-    input_root_dir,
-    output_root_dir,
-    sample_ratio_csv=None # optional CSV: columns ["dataset","fire","sample_every"]
+        input_root_dir,
+        output_root_dir,
+        sample_ratio_csv=None,
+        image_size=None
 ):
     os.makedirs(output_root_dir, exist_ok=True)
 
-    # Load sample ratios if provided
+    # 1. Handle image_size input flexibility
+    if isinstance(image_size, int):
+        target_size = (image_size, image_size)
+    elif isinstance(image_size, (tuple, list)) and len(image_size) == 2 and isinstance(image_size[0], int):
+        target_size = tuple(image_size)
+    else:
+        target_size = None  # Covers None, (None, None), etc.
+
+    # 2. Load sample ratios if provided
     sample_ratios = {}
     if sample_ratio_csv is not None and os.path.exists(sample_ratio_csv):
         df_ratio = pd.read_csv(sample_ratio_csv)
@@ -344,65 +374,73 @@ def create_unified_dataset(
             sample_every = int(row["sample_every"])
             sample_ratios[(dataset, fire)] = sample_every
 
+    tasks = []
     new_rows = []
     next_index = 1
 
-    # Walk through all datasets
+    # 3. Walk through folders and plan the tasks
+    print("Scanning directories and planning tasks...")
     for dataset_name in os.listdir(input_root_dir):
         dataset_path = os.path.join(input_root_dir, dataset_name)
         if not os.path.isdir(dataset_path):
             continue
 
-        # Check Fire / NoFire subfolders
         for fire_folder_name, fire_value in [("Fire", 1), ("NoFire", 0)]:
             folder_path = os.path.join(dataset_path, fire_folder_name)
             if not os.path.exists(folder_path):
                 continue
 
-            # Determine sampling interval
             sample_every = sample_ratios.get((dataset_name, fire_value), 1)
-
             images = sorted(os.listdir(folder_path))
+
             for idx, image_name in enumerate(images):
                 if idx % sample_every != 0:
                     continue
 
                 old_image_path = os.path.join(folder_path, image_name)
                 if not os.path.exists(old_image_path):
-                    print(f"Warning: image not found: {old_image_path}")
                     continue
 
-                # New image name
                 new_image_name = f"img_{next_index:06d}.jpg"
                 new_image_path = os.path.join(output_root_dir, new_image_name)
 
-                shutil.copy2(old_image_path, new_image_path)
+                # Queue the task for parallel execution
+                tasks.append((old_image_path, new_image_path, target_size))
 
-                # Record in CSV
                 new_rows.append({
                     "id": new_image_name,
                     "dataset": dataset_name,
                     "fire": fire_value
                 })
-
                 next_index += 1
 
-    # Save unified CSV
+    # 4. Execute processing in parallel using all CPU cores
+    print(f"Starting processing of {len(tasks)} images...")
+    with ProcessPoolExecutor() as executor:
+        # Wrapped in tqdm for a nice progress bar
+        results = list(tqdm(executor.map(_process_single_image, tasks), total=len(tasks)))
+
+    # 5. Save unified CSV
     csv_path = os.path.join(output_root_dir, "labels.csv")
     pd.DataFrame(new_rows).to_csv(csv_path, index=False)
-    print(f"Unified dataset created with {next_index - 1} images at {output_root_dir}")
 
+    # Error Reporting
+    errors = [res for res in results if res is not True]
+    if errors:
+        print(f"Finished with {len(errors)} errors. Check console for details.")
+
+    print(f"Success! Unified dataset with {len(new_rows)} images created at {output_root_dir}")
 
 # -------------------
 # Example usage
 # -------------------
 if __name__ == "__main__":
 
-    # =====================================================
-    # Split by dataset (fire - no fire)
-    # =====================================================
-    # source_images_dir = "TEST"
-    # source_csv_path = "labels.csv"
+    # # =====================================================
+    # # Split by dataset (fire - no fire)
+    # # =====================================================
+    # source_images_dir = r"C:\Projects\Flame2\Datasets_FromDvir\Datasets\rgb_images"
+    # source_csv_path = r"C:\Projects\Flame2\Datasets_FromDvir\Datasets\labels.csv"
     # output_root_dir = "DatasetsBySource"
     # split_by_dataset_fire(source_images_dir, source_csv_path, output_root_dir)
 
@@ -442,8 +480,9 @@ if __name__ == "__main__":
     # =====================================================
     # Create unified dataset
     # =====================================================
-    input_root_dir = "DatasetsBySource"
-    output_root_dir = "UnifiedDataset"
+    input_root_dir = r"..\Seperated_Dataset"
+    output_root_dir = r"..\UnifiedDataset"
     sample_ratio_csv = "SampleRatio.csv"
+    image_size = (224,224)
 
-    create_unified_dataset(input_root_dir, output_root_dir, sample_ratio_csv)
+    create_unified_dataset(input_root_dir, output_root_dir, sample_ratio_csv, image_size)

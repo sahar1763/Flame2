@@ -96,6 +96,8 @@ class Trainer:
             test_acc.append(test_result["accuracy"])
 
             # ONLY Master prints and logs
+            stop_training = False
+
             if self.is_master:
                 if epoch % print_every == 0 or epoch == num_epochs - 1:
                     print(f"--- EPOCH {epoch + 1}/{num_epochs} ---")
@@ -139,11 +141,17 @@ class Trainer:
                         print(f"Reducing learning rate to {self.optimizer.param_groups[0]['lr']:.6e}")
                     if early_stopping and epochs_without_improvement >= early_stopping:
                         print(f"*** Early stopping at epoch {epoch + 1} ***")
-                        break
+                        stop_training = True
 
-            # Synchronize processes before next epoch (keeps GPUs in sync)
+            # broadcast decision to all processes
             if torch.distributed.is_initialized():
-                torch.distributed.barrier()
+                # torch.distributed.barrier()
+                stop_tensor = torch.tensor(int(stop_training), device=self.device)
+                torch.distributed.broadcast(stop_tensor, src=0)
+                stop_training = bool(stop_tensor.item())
+
+            if stop_training:
+                break
 
         # Final Evaluation logic (Confusion Matrix)
         if self.is_master:
@@ -154,10 +162,24 @@ class Trainer:
     def _finalize_results(self, dl_test, checkpoint_path):
         """Helper to generate final reports - Rank 0 only"""
         y_true, y_pred = [], []
-        self.model.eval()
+
+        # Use the underlying model (module) to bypass DDP/SyncBN overhead
+        model_to_eval = self.model.module if hasattr(self.model, 'module') else self.model
+        model_to_eval.eval()
+
+        # Create a temporary non-distributed loader to see the FULL dataset
+        full_test_loader = torch.utils.data.DataLoader(
+            dl_test.dataset,
+            batch_size=dl_test.batch_size,
+            shuffle=False,
+            num_workers=dl_test.num_workers,
+            pin_memory=True
+        )
+
         with torch.no_grad():
-            for X, y, _ in dl_test:
-                preds = self.model(X.to(self.device)).argmax(dim=1)
+            for X, y, _ in full_test_loader:
+                outputs = model_to_eval(X.to(self.device))
+                preds = outputs.argmax(dim=1)
                 y_true.extend(y.cpu().numpy())
                 y_pred.extend(preds.cpu().numpy())
 
@@ -171,10 +193,11 @@ class Trainer:
             cm_df = pd.DataFrame(cm, index=["No Fire", "Fire"], columns=["Pred No Fire", "Pred Fire"])
             cm_df.to_csv(os.path.join(results_dir, "confusion_matrix.csv"))
 
-            # --- ADD THESE 4 LINES FOR THE REPORT ---
             report = classification_report(y_true, y_pred, target_names=["No Fire", "Fire"], output_dict=True)
             report_df = pd.DataFrame(report).transpose()
             report_df.to_csv(os.path.join(results_dir, "classification_report.csv"))
+
+            print(f"\n*** Final Report (Full Test Set: {len(y_true)} images) ***")
             print("\n*** Classification Report ***\n", report_df)
 
     def _run_epoch(self, dl, train, max_batches=None):

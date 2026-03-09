@@ -143,17 +143,11 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, con
     test_sampler = torch.utils.data.distributed.DistributedSampler(
         test_dataset, num_replicas=world_size, rank=rank, shuffle=False
     )
-    print(f"world_size: {world_size}")
-    print(f"rank: {rank}")
 
     # Create loaders
     dataloader_params = config.get("dataloader", {})
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, **dataloader_params)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, **dataloader_params)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler, **dataloader_params)
-
-    print(f"Train size: {len(train_dataset)}")
-    print(f"Validation size: {len(val_dataset)}")
-    print(f"Test size: {len(test_dataset)} (includes test-only datasets)")
 
     return train_loader, val_loader, test_loader, num_classes

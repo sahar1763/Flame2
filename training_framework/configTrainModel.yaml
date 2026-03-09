@@ -2,9 +2,9 @@ dataset:
   images_dir: "../UnifiedDataset"
   labels_csv: "../UnifiedDataset/labels.csv"
   image_size: 224
-  val_ratio: 0.4
+  val_ratio: 0.2
   test_only:
-    - FLAME_2
+    - FireMan
 
 dataloader:
   pin_memory: true
@@ -17,10 +17,10 @@ training:
   lr: 0.0001
   weight_decay: 0.0001
   batch_size: 256
-  num_epochs: 5
+  num_epochs: 150
   early_stopping: 10
-  print_every: 1
-  max_batches_per_epoch: 100
+  print_every: 5
+  max_batches_per_epoch:
   update_lr_epoch_num: 3
   lr_factor: 0.5
 

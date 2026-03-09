@@ -6,6 +6,7 @@ import logging
 import shutil
 import random
 from datetime import datetime
+import warnings
 
 import torch
 import torch.nn as nn
@@ -19,9 +20,30 @@ import wandb
 from functions.training import ClassificationGuidedEncoding
 from functions.plot import plot_fit
 from functions.datasets import prepare_dataloaders
+from collections import Counter
 
 sys.path.append(os.path.abspath(".."))
 
+def analyze_class_distribution(train_loader, val_loader, test_loader, is_master=True):
+    train_counts = Counter(train_loader.dataset.labels)
+    val_counts = Counter(val_loader.dataset.labels)
+    test_counts = Counter(test_loader.dataset.labels)
+
+    if is_master:
+        print("\nTrain class distribution:")
+        print(train_counts)
+
+        print("\nValidation class distribution:")
+        print(val_counts)
+
+        print("\nTest class distribution:")
+        print(test_counts)
+
+    class0_train_val = train_counts.get(0, 0) + val_counts.get(0, 0)
+    class1_train_val = train_counts.get(1, 0) + val_counts.get(1, 0)
+    total_train_val = len(train_loader.dataset.labels) + len(val_loader.dataset.labels)
+
+    return class0_train_val, class1_train_val, total_train_val
 
 # ===================== Reproducibility =====================
 def set_seed(seed: int = 42):
@@ -131,7 +153,10 @@ def main(config_path: str):
         world_size=world_size
     )
 
-
+    class0_tv, class1_tv, total_tv = analyze_class_distribution(
+        train_loader, val_loader, test_loader, is_master
+    )
+    training_weight = [class1_tv/total_tv , class0_tv/total_tv]
 
     # ---------- Initialize Model ----------
     model_name = config["training"]["model_name"]
@@ -161,7 +186,7 @@ def main(config_path: str):
         logging.info(f"Epochs: {num_epochs}")
 
     # ---------- Loss & Optimizer ----------
-    weights = torch.tensor([7.0, 3.0]).cuda()
+    weights = torch.tensor(training_weight, dtype=torch.float).to(device)
     loss_fn = nn.CrossEntropyLoss(weight=weights)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -205,12 +230,15 @@ def main(config_path: str):
         run.finish()
         logging.info("W&B run finished.")
 
-    # Cleanly exit the distributed group
-    dist.destroy_process_group()
-
+    # Wait for master to finish plots and reports
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 # ===================== Entry Point =====================
 if __name__ == "__main__":
+    warnings.filterwarnings("ignore")
+
     parser = argparse.ArgumentParser(description="Train wildfire detection model")
     parser.add_argument(
         "--config",
