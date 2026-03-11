@@ -46,7 +46,9 @@ class Trainer:
         max_batches_per_epoch = config["training"]["max_batches_per_epoch"]
 
         best_acc = None
+        best_acc_valid = None
         epochs_without_improvement = 0
+        acc_threshold = config["training"]["acc_threshold"]
         checkpoint_path = f"{checkpoints}.pt" if checkpoints else None
 
         train_loss, train_acc = [], []
@@ -119,10 +121,10 @@ class Trainer:
                     }, step=epoch + 1)
 
                 # Early Stopping and Saving (ONLY Master Rank)
-                if best_acc is None or val_result["accuracy"] > best_acc:
+                is_any_improvement = (best_acc is None or val_result["accuracy"] > best_acc)
+                if is_any_improvement:
                     best_acc = val_result["accuracy"]
                     checkpoint_test_acc = test_result["accuracy"]
-                    epochs_without_improvement = 0
                     if checkpoint_path:
                         torch.save({
                             # CRITICAL: Save self.model.module for DDP
@@ -133,6 +135,11 @@ class Trainer:
                             "ewi": epochs_without_improvement
                         }, checkpoint_path)
                         print(f"*** Saved checkpoint at epoch {epoch + 1}")
+
+                is_significant = (best_acc_valid is None or val_result["accuracy"] > best_acc_valid + acc_threshold)
+                if is_significant:
+                    best_acc_valid = val_result["accuracy"]
+                    epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
                     if epochs_without_improvement % update_lr_epoch_num == 0:

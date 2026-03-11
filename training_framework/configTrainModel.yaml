@@ -23,6 +23,7 @@ training:
   max_batches_per_epoch:
   update_lr_epoch_num: 3
   lr_factor: 0.5
+  acc_threshold : 0.1
 
 wandb:
   entity: "WildFire_Detector"
