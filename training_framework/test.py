@@ -92,8 +92,6 @@ def main(experiment_path):
     checkpoint_path = os.path.join(experiment_path, "checkpoints", "best_model.pt")
     print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    best_acc = checkpoint['best_acc']
-    print(f"Best Accuracy at Checkpoint: {best_acc}%")
 
     config_path = os.path.join(experiment_path, "config.yaml")
     with open(config_path, "r", encoding="utf-8") as f:
@@ -130,6 +128,7 @@ def main(experiment_path):
 
     label_names = ["No Fire", "Fire"]
     results_dir = os.path.join(experiment_path, "test")
+    os.makedirs(results_dir, exist_ok=True)
     evaluate_model(model, test_loader, device, label_names, results_dir)
 
 if __name__ == "__main__":
@@ -138,3 +137,5 @@ if __name__ == "__main__":
                         help="Path to experiment folder containing checkpoints/config.yaml")
     args = parser.parse_args()
     main(args.experiment)
+
+    # python3 test.py --experiment ../experiments/2026-03-11_15-27-18_resnet18
