@@ -162,6 +162,16 @@ class Trainer:
 
         # Final Evaluation logic (Confusion Matrix)
         if self.is_master:
+            # RELOAD THE BEST WEIGHTS BEFORE REPORTING
+            if checkpoint_path and os.path.isfile(checkpoint_path):
+                print(f"*** Reloading best model from {checkpoint_path} for final evaluation ***")
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+                # Use .module if DDP, otherwise direct
+                model_to_load = self.model.module if hasattr(self.model, 'module') else self.model
+                model_to_load.load_state_dict(checkpoint["model_state"])
+
+            # Now the confusion matrix will be based on the BEST version
             self._finalize_results(dl_test, checkpoint_path)
 
         return TrainingResults(train_loss, val_loss, test_loss, train_acc, val_acc, test_acc)
