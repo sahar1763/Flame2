@@ -172,6 +172,25 @@ def main(config_path: str):
         num_ftrs = model.classifier.in_features
         model.classifier = nn.Linear(num_ftrs, num_classes)
 
+    # Optionally freeze backbone — only train the classification head
+    if config["training"].get("freeze_backbone", False):
+        for param in model.parameters():
+            param.requires_grad = False
+        # Unfreeze classification head
+        if "resnet" in model_name.lower():
+            for param in model.fc.parameters():
+                param.requires_grad = True
+        elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
+            for param in model.classifier[-1].parameters():
+                param.requires_grad = True
+        elif "densenet" in model_name.lower():
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+        if is_master:
+            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            total = sum(p.numel() for p in model.parameters())
+            logging.info(f"Backbone frozen. Training {trainable:,} / {total:,} parameters (head only)")
+
     model = model.to(device)
 
     # Wrap model to synchronize gradients across GPUs
@@ -188,7 +207,7 @@ def main(config_path: str):
     # ---------- Loss & Optimizer ----------
     weights = torch.tensor(training_weight, dtype=torch.float).to(device)
     loss_fn = nn.CrossEntropyLoss(weight=weights)
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=weight_decay)
 
     # ---------- Trainer ----------
     trainer = ClassificationGuidedEncoding(
@@ -223,9 +242,9 @@ def main(config_path: str):
 
         # ---------- Save Best Metrics to W&B ----------
         if fit_res.val_acc:
-            run.summary["best_val_acc"] = max(fit_res.val_acc)
-        if fit_res.test_acc:
-            run.summary["best_test_acc"] = max(fit_res.test_acc)
+            best_val_idx = int(np.argmax(fit_res.val_acc))
+            run.summary["best_val_acc"] = fit_res.val_acc[best_val_idx]
+            run.summary["best_test_acc"] = fit_res.test_acc[best_val_idx]
 
         run.finish()
         logging.info("W&B run finished.")

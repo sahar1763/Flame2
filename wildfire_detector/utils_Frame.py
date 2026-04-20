@@ -1,45 +1,168 @@
 import cv2
 import numpy as np
-from sklearn.cluster import DBSCAN
 from scipy.spatial.transform import Rotation as R
-from scipy.optimize import linear_sum_assignment
+import time
 
 
-def project_points_with_homography(corners, H):
-    # corners: array of shape (N, 2), where N is the number of points.
-    ones = np.ones((corners.shape[0], 1))
-    corners_h = np.hstack([corners, ones])  # Shape: (N, 3)
-
-    projected_h = (H @ corners_h.T).T  # Shape: (N, 3)
-
-    # Convert back from homogeneous to 2D pixel coordinates by dividing x and y by the scale (z).
-    projected_pixels = projected_h[:, :2] / projected_h[:, 2, np.newaxis]
-
-    # Return the projected 2D pixel coordinates as a (N, 2) array.
-    return projected_pixels
-
-
-def create_homography(pts_dst, pts_src):
+def create_homography(src_yx, dst_yx):
     """
-    Computes the homography matrix from pts_src to pts_dst.
+    Compute a homography from (y, x) source points to (y, x) destination points.
+    Internally converts to OpenCV (x, y) convention so the returned H is
+    compatible with cv2.warpPerspective.
+
+    Parameters:
+        src_yx: ndarray (N, 2) — source points in (y, x) order
+        dst_yx: ndarray (N, 2) — destination points in (y, x) order
+
+    Returns:
+        H: 3x3 homography matrix in (x, y) convention
+        mask: inlier mask from cv2.findHomography
     """
-    H, _ = cv2.findHomography(pts_src, pts_dst)
-    return H
+    src_xy = src_yx[:, ::-1]
+    dst_xy = dst_yx[:, ::-1]
+    H, mask = cv2.findHomography(src_xy, dst_xy)
+    return H, mask
 
 
-def preprocess_images(image, applying=False):
+def project_points_with_homography(points_yx, H):
+    """
+    Project (y, x) points through a homography H (in OpenCV x,y convention).
+    Input and output are in (y, x) order.
+
+    Parameters:
+        points_yx: ndarray (N, 2) — points in (y, x) order
+        H: 3x3 homography matrix in (x, y) convention
+
+    Returns:
+        ndarray (N, 2) — projected points in (y, x) order
+    """
+    # Flip (y, x) → (x, y) for homography math
+    points_xy = points_yx[:, ::-1]
+
+    ones = np.ones((points_xy.shape[0], 1))
+    pts_h = np.hstack([points_xy, ones])  # Shape: (N, 3)
+
+    projected_h = (H @ pts_h.T).T  # Shape: (N, 3)
+    projected_xy = projected_h[:, :2] / projected_h[:, 2, np.newaxis]
+
+    # Flip (x, y) → (y, x)
+    projected_yx = projected_xy[:, ::-1].copy()
+    return projected_yx
+
+
+def project_bboxes_with_homography(bboxes, H):
+    """
+    Project bounding boxes from one image frame to another using a homography.
+    Batched: all bbox corners are projected in a single matrix multiply.
+
+    Parameters:
+        bboxes: list/array of (min_y, min_x, max_y, max_x) tuples, length N
+        H: 3x3 homography matrix
+
+    Returns:
+        list of (min_y, min_x, max_y, max_x) tuples in projected space
+    """
+    if len(bboxes) == 0:
+        return []
+
+    bboxes_arr = np.asarray(bboxes, dtype=np.float64)  # (N, 4)
+
+    # Stack all corners into (2N, 2) array: [min_y, min_x] and [max_y, max_x] per bbox
+    all_corners = np.empty((2 * len(bboxes_arr), 2), dtype=np.float64)
+    all_corners[0::2] = bboxes_arr[:, :2]  # (min_y, min_x)
+    all_corners[1::2] = bboxes_arr[:, 2:]  # (max_y, max_x)
+
+    # Single batched projection
+    projected = project_points_with_homography(all_corners, H)  # (2N, 2) in (y, x)
+
+    # Reshape to (N, 2, 2) — each bbox has 2 projected corners
+    projected = projected.reshape(-1, 2, 2)
+
+    # Extract min/max per bbox
+    projected_bboxes = []
+    for i in range(len(projected)):
+        y1 = int(np.floor(projected[i, :, 0].min()))
+        x1 = int(np.floor(projected[i, :, 1].min()))
+        y2 = int(np.ceil(projected[i, :, 0].max()))
+        x2 = int(np.ceil(projected[i, :, 1].max()))
+        projected_bboxes.append((y1, x1, y2, x2))
+
+    return projected_bboxes
+
+
+def suppress_bboxes_on_diff_map(diff_map, projected_bboxes, margin_px=0):
+    """
+    Zero out regions in the diff map around projected bounding boxes.
+
+    Parameters:
+        diff_map: 2D array (modified in-place)
+        projected_bboxes: list of (min_y, min_x, max_y, max_x)
+        margin_px: pixel margin to expand each bbox
+    """
+    h, w = diff_map.shape[:2]
+
+    # Build a mask of all bbox regions (True = inside a bbox)
+    bbox_mask = np.zeros((h, w), dtype=bool)
+    for bbox in projected_bboxes:
+        y1 = max(0, bbox[0] - margin_px)
+        x1 = max(0, bbox[1] - margin_px)
+        y2 = min(h, bbox[2] + margin_px)
+        x2 = min(w, bbox[3] + margin_px)
+        bbox_mask[y1:y2, x1:x2] = True
+
+    # Compute mean excluding bbox regions
+    outside = ~bbox_mask
+    if outside.any():
+        mean_value = diff_map[outside].mean()
+    else:
+        mean_value = diff_map.mean()  # fallback if bboxes cover entire image
+
+    # Suppress
+    diff_map[bbox_mask] = mean_value
+
+
+def compute_diff_threshold_from_zscore(diff_map, z_score, min_threshold=0.0):
+    """
+    Compute an absolute pixel threshold from a z-score on the diff map.
+
+    threshold = max(mean + z_score * std, min_threshold)
+
+    Parameters:
+        diff_map: 2D array (already suppressed)
+        z_score: number of standard deviations above the mean
+        min_threshold: minimum floor value (e.g. sensor measurement error)
+
+    Returns:
+        float: absolute threshold value
+    """
+    # --- Z-score approach ---
+    mu = diff_map.mean()
+    sigma = diff_map.std()
+    threshold = mu + z_score * sigma
+
+    # --- MAD-based approach (more robust to outlier fire pixels) ---
+    # median = np.median(diff_map)
+    # mad = np.median(np.abs(diff_map - median))
+    # threshold = median + z_score * 1.4826 * mad  # 1.4826 scales MAD to match std for Gaussian
+
+    return max(threshold, min_threshold)
+
+
+def preprocess_images(image1, image2=None, applying=False):
+    img1 = image1.astype(np.float32)
     if applying:
-        img = image.astype(np.float32)
-        img = img - img.mean()
-        img = np.clip(img, 0, 255)  # clamp negative values to 0 and max to 255
-        img = img.astype(np.uint8)  # convert back to uint8
-        return img
-    return image
+        img1 = img1 - img1.mean()
+    if image2 is None:
+        return img1
+    img2 = image2.astype(np.float32)
+    if applying:
+        img2 = img2 - img2.mean()
+    return img1, img2
 
 
 def compute_positive_difference(img1, img2):
     diff = img2 - img1
-    diff = np.maximum(diff, 0)
+    # diff = np.maximum(diff, 0)
     return diff
 
 
@@ -66,282 +189,95 @@ def postprocess_difference_map(diff, img2, threshold=None, temp_threshold=None):
     return diff
 
 
-def find_cluster_centers_conditional(diff_map, threshold=10, eps=1.5, min_samples=2, min_contrast=10):
-    """
-    Applies DBSCAN on a diff map and returns:
-    - the center of each cluster, chosen conditionally (hottest point or geometric center),
-    - the BBox of each cluster,
-    - the full label map.
+def find_cluster_centers_conditional(
+    diff_map,
+    threshold=10,
+    half_kernel_size=1.5,
+    min_samples=2,
+    min_contrast=10
+):
 
-    Parameters:
-        diff_map: 2D array
-        threshold: only consider diff values above this
-        eps: DBSCAN neighborhood radius
-        min_samples: DBSCAN min points per cluster
-        min_contrast: minimum contrast (custom condition) to prefer hottest point
-
-    Returns:
-        centers: list of (i, j) tuples (float)
-        label_map: 2D array same shape as diff_map with cluster labels
-        bboxes: list of (min_i, min_j, max_i, max_j)
-    """
-    active_pixels = np.argwhere(diff_map > threshold)
-    if len(active_pixels) == 0:
+    mask = (diff_map > threshold).astype(np.uint8)
+    if mask.sum() == 0:
         return [], [], []
 
-    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(active_pixels)
-    labels_flat = clustering.labels_
+    # Morphological closing
+    half_kernel_size_int = int(round(half_kernel_size))
+    if half_kernel_size_int >= 1:
+        kernel_size = 2 * half_kernel_size_int + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+        grouped = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    else:
+        grouped = mask
 
+    # Connected components
+    num_labels, labels_raw = cv2.connectedComponents(grouped, connectivity=8)
+
+    # print(f"num_labels: {num_labels}")
+
+    # Active pixels only (same logic as before)
+    active = mask.astype(bool)
+
+    # === Collect all relevant points ONCE ===
+    points = np.argwhere((labels_raw > 0) & active)
+    if len(points) == 0:
+        return [], [], []
+
+    point_labels = labels_raw[points[:, 0], points[:, 1]]
+    values = diff_map[points[:, 0], points[:, 1]]
+
+    # === Sort by label for grouping ===
+    order = np.argsort(point_labels)
+    points = points[order]
+    point_labels = point_labels[order]
+    values = values[order]
+
+    # === Split into clusters ===
+    split_idx = np.where(np.diff(point_labels) != 0)[0] + 1
+    points_split = np.split(points, split_idx)
+    values_split = np.split(values, split_idx)
+    labels_split = np.split(point_labels, split_idx)
+
+    # Output containers
     label_map = np.full(diff_map.shape, -1, dtype=int)
-    for idx, (i, j) in enumerate(active_pixels):
-        label_map[i, j] = labels_flat[idx]
-
     centers = []
     bboxes = []
+    next_label = 0
 
-    for label in np.unique(labels_flat):
-        if label == -1:
-            continue  # skip noise
+    # === Process each cluster ===
+    for cluster_points, cluster_values, cluster_labels in zip(points_split, values_split, labels_split):
 
-        cluster_points = active_pixels[labels_flat == label]
-        values = diff_map[cluster_points[:, 0], cluster_points[:, 1]]
+        if len(cluster_points) < min_samples:
+            continue
 
-        # Determine center
-        z = (values.max() - values.mean()) / (values.std() + 1e-6)
+        # Assign contiguous label
+        label_map[cluster_points[:, 0], cluster_points[:, 1]] = next_label
+
+        # --- center calculation ---
+        z = (cluster_values.max() - cluster_values.mean()) / (cluster_values.std() + 1e-6)
+
         if z >= min_contrast:
-            hottest_idx = np.argmax(values)
-            center = cluster_points[hottest_idx]
+            center = cluster_points[np.argmax(cluster_values)]
         else:
-            # Compute weights: normalize to avoid extremely large differences
-            weights = values - values.min() + 1e-6  # ensure positive
-            weights /= weights.sum()  # normalize to sum=1
-
-            # Compute weighted center
+            weights = cluster_values - cluster_values.min() + 1e-6
+            weights /= weights.sum()
             center = np.average(cluster_points, axis=0, weights=weights)
 
         centers.append(tuple(center))
 
-        # Determine BBox
-        min_i, min_j = cluster_points.min(axis=0)
-        max_i, max_j = cluster_points.max(axis=0)
-        bboxes.append((min_i, min_j, max_i+1, max_j+1))
+        # --- bbox ---
+        min_y, min_x = cluster_points.min(axis=0)
+        max_y, max_x = cluster_points.max(axis=0)
+        bboxes.append((min_y, min_x, max_y + 1, max_x + 1))
+
+        next_label += 1
+
+    if len(centers) == 0:
+        return [], [], []
+
+    # print(f"len(centers): {len(centers)}")
 
     return centers, label_map, bboxes
-
-
-def associate_clusters(centers_phase1, centers_phase0, distance_threshold):
-    """
-    For each cluster center in phase1, find all candidate centers in phase0
-    within distance_threshold.
-
-    Parameters
-    ----------
-    centers_phase1 : list of (y, x)
-    centers_phase0 : list of (y, x)
-    distance_threshold : float (in pixels)
-
-    Returns
-    -------
-    associations : dict
-        {
-            idx_phase1: [
-                (idx_phase0, distance),
-                ...
-            ]
-        }
-        Each list is sorted from closest to farthest.
-    """
-
-    associations = {}
-
-    if not centers_phase1:
-        return {}
-
-    if not centers_phase0:
-        return {i: [] for i in range(len(centers_phase1))}
-
-    p1 = np.array(centers_phase1, dtype=float)
-    p0 = np.array(centers_phase0, dtype=float)
-
-    for i, c1 in enumerate(p1):
-
-        # Compute distances to all phase0 centers
-        dists = np.linalg.norm(p0 - c1, axis=1)
-
-        # Filter by threshold
-        valid = np.where(dists <= distance_threshold)[0]
-
-        # Build sorted list of (index, distance)
-        matches = [(int(j), float(dists[j])) for j in valid]
-        matches.sort(key=lambda x: x[1])
-
-        associations[i] = matches
-
-    return associations
-
-
-def extract_orb_descriptors(image, cluster_centers, patch_size_px=31.0):
-    """
-    ORB descriptor extraction for real-time cluster tracking.
-
-    Parameters:
-    -----------
-    patch_size_px : float
-        ORB default is 31. This controls the 'size' of the area described.
-    """
-
-    patch_size_px = np.clip(patch_size_px, 31, 64)
-
-    if image.ndim == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
-
-    num_inputs = len(cluster_centers)
-    if num_inputs == 0:
-        return np.array([]), np.array([], dtype=bool)
-
-    # Create KeyPoints
-    input_kps = [
-        cv2.KeyPoint(x=float(cx), y=float(cy), size=patch_size_px)
-        for (cy, cx) in cluster_centers
-    ]
-
-    # ORB
-    orb = cv2.ORB_create(patchSize=int(patch_size_px))
-    keypoints_out, descriptors_out = orb.compute(gray, input_kps)
-
-    final_descriptors = np.zeros((num_inputs, 32), dtype=np.uint8)
-    valid_mask = np.zeros(num_inputs, dtype=bool)
-
-    if descriptors_out is not None:
-
-        out_coords = np.array([kp.pt for kp in keypoints_out])  # (M, 2)
-        in_coords = np.array([(cx, cy) for (cy, cx) in cluster_centers])  # (N, 2)
-
-        for i, pt in enumerate(out_coords):
-            dist_sq = np.sum((in_coords - pt) ** 2, axis=1)
-            original_idx = np.argmin(dist_sq)
-
-            if dist_sq[original_idx] < 0.01:
-                final_descriptors[original_idx] = descriptors_out[i]
-                valid_mask[original_idx] = True
-
-    return final_descriptors, valid_mask
-
-
-def compute_cluster_cost_matrix(
-    clusters_phase1,
-    clusters_phase0,
-    gsd,
-    config,
-):
-    """
-    Compute a cost matrix between clusters in two images.
-
-    Parameters
-    ----------
-    clusters_phase1 : dict
-        { idx: { "center": (y,x),
-                  "descriptor": np.array(128,) or None,
-                  "area": int,
-                  "max_val": float } }
-
-    clusters_phase0 : dict
-        same structure as clusters_phase1
-
-    gsd : float
-        meters per pixel
-
-    distance_threshold : float
-        maximum allowed physical distance (meters).
-        If exceeded, the score is set to infinity.
-
-    w_dist, w_desc, w_area, w_maxval : float
-        weights for each component. Should sum to 1.
-
-    Returns
-    -------
-    cost_matrix : np.ndarray
-        shape (len(clusters_phase1), len(clusters_phase0))
-    """
-
-    distance_threshold = config['cost_matrix']['max_distance']
-    desc_score_threshold = config['cost_matrix']['desc_score_threshold']
-    temp_threshold = config['cost_matrix']['temp_threshold']
-    area_ratio_threshold = config['cost_matrix']['area_ratio_threshold']
-    w_dist = config['cost_matrix']['scaling_weights']['dist']
-    w_desc = config['cost_matrix']['scaling_weights']['desc']
-    w_area = config['cost_matrix']['scaling_weights']['area']
-    w_maxval = config['cost_matrix']['scaling_weights']['maxval']
-
-    TOTAL_BITS = 256
-
-    n1 = len(clusters_phase1)
-    n0 = len(clusters_phase0)
-
-    cost_matrix = np.zeros((n1, n0), dtype=float)
-
-    for i, c1 in clusters_phase1.items():
-        center1 = np.array(c1["center"])
-        desc1 = c1["descriptor"]
-        area1 = c1["area"]
-        maxval1 = c1["max_val"]
-
-        for j, c0 in clusters_phase0.items():
-            center0 = np.array(c0["center"])
-            desc0 = c0["descriptor"]
-            area0 = c0["area"]
-            maxval0 = c0["max_val"]
-
-            # Physical distance
-            dist_px = np.linalg.norm(center1 - center0)
-            dist_m = dist_px * gsd
-
-            # print(f"GSD: {gsd}")
-            # print(f"dist_px: {dist_px}")
-            # print(f"dist_m: {dist_m}")
-
-            if dist_m > distance_threshold:
-                cost_matrix[i, j] = 100
-                continue
-
-            dist_score = dist_m / distance_threshold
-
-            # Descriptor similarity (cosine distance)
-            if desc1 is None or desc0 is None or np.any(np.isnan(desc1)) or np.any(np.isnan(desc0)) \
-                    or np.linalg.norm(desc1) == 0 or np.linalg.norm(desc0) == 0:
-                desc_score = 1.0  # maximum distance if descriptor missing or invalid
-            else:
-                diff_bits = cv2.norm(desc1, desc0, cv2.NORM_HAMMING)
-                desc_score = diff_bits / TOTAL_BITS
-
-                if desc_score > desc_score_threshold:
-                    cost_matrix[i, j] = 100
-
-            # Area similarity
-            area_ratio = min(area1, area0) / max(area1, area0)
-            area_score = 1 - area_ratio
-            if area_ratio > area_ratio_threshold:
-                cost_matrix[i, j] = 100
-
-            # Max value difference
-            maxval_diff = abs(maxval1 - maxval0)
-            maxval_score = maxval_diff / 255.0  # normalize to [0,1]
-            if maxval_diff > temp_threshold:
-                cost_matrix[i, j] = 100
-
-            # Weighted total score
-            total_score = (
-                w_dist * dist_score +
-                w_desc * desc_score +
-                w_area * area_score +
-                w_maxval * maxval_score
-            )
-
-            cost_matrix[i, j] = total_score
-
-    return cost_matrix
 
 
 def compute_cluster_size_maxval(label_map, image, gsd):
@@ -378,77 +314,6 @@ def compute_cluster_size_maxval(label_map, image, gsd):
         }
 
     return cluster_info
-
-
-def match_clusters_hungarian(cost_matrix):
-    """
-    Use the Hungarian algorithm to match clusters optimally based on the cost matrix.
-
-    Parameters
-    ----------
-    cost_matrix : np.ndarray
-        Shape (num_clusters_phase1, num_clusters_phase0)
-
-    Returns
-    -------
-    unmatched_mask : np.ndarray, bool
-        True for clusters in phase1 that have NO valid match in phase0.
-    matches : list of tuples
-        List of (idx_phase1, idx_phase0) for matched clusters
-    """
-    num_phase1 = cost_matrix.shape[0]
-    unmatched_mask = np.ones(num_phase1, dtype=bool)  # assume unmatched initially
-    matches = []
-
-    # Hungarian assignment
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-    for r, c in zip(row_ind, col_ind):
-        if cost_matrix[r, c] < 50:
-            unmatched_mask[r] = False
-            matches.append((r, c))
-        else:
-            # cost is infinite → no valid match
-            unmatched_mask[r] = True
-
-    return unmatched_mask, matches
-
-
-def filter_unmatched_clusters(unmatched_mask, centers, bboxes, cluster_info):
-    """
-    Filter out clusters that have no valid match based on unmatched_mask.
-
-    Parameters
-    ----------
-    unmatched_mask : np.ndarray of bool
-        True for clusters that have NO valid match.
-    centers : list of tuples or np.ndarray
-        Cluster centers (y,x) for phase1.
-    bboxes : list of tuples
-        Bounding boxes for clusters in phase1.
-    label_map : np.ndarray, optional
-        Label map corresponding to phase1 clusters. If provided, filtered as well.
-
-    Returns
-    -------
-    filtered_centers : list
-        Cluster centers with only matched clusters.
-    filtered_bboxes : list
-        Bounding boxes of matched clusters.
-    filtered_label_map : np.ndarray or None
-        Filtered label map (if provided), else None.
-    """
-    # Indices of matched clusters
-    unmatched_indices = np.where(unmatched_mask)[0]
-
-    filtered_centers = [centers[i] for i in unmatched_indices]
-    filtered_bboxes = [bboxes[i] for i in unmatched_indices]
-    filtered_cluster_info = {
-        new_idx: cluster_info[old_idx]
-        for new_idx, old_idx in enumerate(unmatched_indices)
-    }
-
-    return filtered_centers, filtered_bboxes, filtered_cluster_info
 
 
 def compute_cluster_scores(

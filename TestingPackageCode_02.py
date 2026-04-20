@@ -16,6 +16,8 @@ import copy
 
 if __name__ == "__main__":
 
+    np.random.seed(42)
+
     # === Init ScanManager ===
     sm = ScanManager()
 
@@ -55,8 +57,9 @@ if __name__ == "__main__":
     # fire_size = sm.config['fire']['max_size_m']  # [m]
 
     results = []  # List to store results from all (phi, theta) pairs
+    phase1_timings = []
 
-
+    print(f"\n=== Phase1 Runtime ===\n")
     for i in range(len(phase1_inputs_imgs)):
         frame_ir = phase1_inputs_imgs[i]
         metadata = phase1_inputs_metadata[i]
@@ -64,8 +67,10 @@ if __name__ == "__main__":
 
         tt0 = time.perf_counter()
         result = sm.phase1(frame_ir, metadata)
-        total_time = time.perf_counter() - tt0
-        print(f"\n=== Phase1 Total Runtime === {total_time * 1000:.2f} msec\n")
+        total_time = (time.perf_counter() - tt0) * 1000  # Convert to msec
+        phase1_timings.append(total_time)
+
+        print(f"\n=== Frame {i} === {total_time:.2f} msec\n")
 
         detected = len(result) if result is not None else 0
         ratio = detected / clusters_num if clusters_num > 0 else (1 if detected == 0 else 0)
@@ -87,6 +92,29 @@ if __name__ == "__main__":
     csv_path = os.path.join(results_dir, "results.csv")
     df.to_csv(csv_path, index=False)
     print(df.head())
+
+    # === Create and Save Timing Graph ===
+    plt.figure(figsize=(10, 6))
+    plt.plot(range(len(phase1_timings)), phase1_timings, marker='o', linestyle='-', color='b')
+
+    # Adding labels and title
+    plt.title("Phase 1 Computation Time per Frame")
+    plt.xlabel("Frame ID")
+    plt.ylabel("Computation Time (ms)")
+    plt.grid(True, linestyle='--', alpha=0.7)
+
+    # Adding a horizontal line for the average time
+    avg_time = np.mean(phase1_timings)
+    plt.axhline(y=avg_time, color='r', linestyle='--', label=f'Avg: {avg_time:.2f}ms')
+    plt.legend()
+
+    # Save to the results directory
+    plot_path = os.path.join(results_dir, "phase1_timings.png")
+    plt.savefig(plot_path)
+    plt.close()  # Close plot to free memory
+
+    print(f"Timing graph saved to: {plot_path}")
+
 
     # ==== Phase 2 ====
 

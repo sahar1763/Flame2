@@ -30,10 +30,13 @@ def geo2pixel(corners_0, theta1, phi1, h1=2500, x1=0, y1=7500, hfov1=17.5, img_s
     #   ], dtype=np.float32)
     
     # Step 2: Compute homography that maps world coordinates (corners_1) to image1 pixels
-    H_world_to_image1 = create_homography(pts_image, corners_1[:,:2])
+    # World coords from pixel2geo are (x_world, y_world, z). Swap to (y, x) for our convention.
+    corners_1_yx = corners_1[:, [1, 0]]
+    corners_0_yx = corners_0[:, [1, 0]]
+    H_world_to_image1, _ = create_homography(corners_1_yx, pts_image)
     
     # Step 3: Project the world-space corners of image0 (corners_0) into image1's pixel space
-    pixels_img0_at_img1 = project_points_with_homography(corners_0[:,:2], H_world_to_image1)
+    pixels_img0_at_img1 = project_points_with_homography(corners_0_yx, H_world_to_image1)
 
     return pixels_img0_at_img1, corners_1
 
@@ -461,3 +464,91 @@ def Creating_Phase1_input(PHI, THETA, x0, y0, h0, hfov0, metadata, config):
     return image_array, metadata_array, clusters_num_array, cluster_centers_array
 
 
+def save_diffmap_histogram_with_fit(
+    diff_map,
+    threshold,
+    save_path,
+    title="Diff-map Histogram with Normal Fit",
+):
+
+    values = np.asarray(diff_map, dtype=np.float32).ravel()
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return
+
+    mu = float(values.mean())
+    sigma = float(values.std())
+    sigma_safe = max(sigma, 1e-6)
+
+    # === FIXED integer bins (-256 ... 256) ===
+    bin_edges = np.arange(-256.5, 257.5, 1.0)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    # Histogram
+    hist_counts, _ = np.histogram(values, bins=bin_edges)
+
+    # === Find non-empty bins ===
+    nonzero_idx = np.where(hist_counts > 0)[0]
+
+    if len(nonzero_idx) > 0:
+        xmin = bin_centers[nonzero_idx[0]]
+        xmax = bin_centers[nonzero_idx[-1]]
+    else:
+        xmin, xmax = -1, 1  # fallback
+
+    # (optional)
+    margin = 2
+    xmin -= margin
+    xmax += margin
+
+    # X-axis for normal fit (only where needed)
+    x = np.linspace(xmin, xmax, 2000)
+
+    pdf = (1.0 / (sigma_safe * np.sqrt(2.0 * np.pi))) * np.exp(
+        -0.5 * ((x - mu) / sigma_safe) ** 2
+    )
+
+    # Scale PDF
+    bin_width = 1.0
+    pdf_scaled = pdf * values.size * bin_width
+
+    # Save
+    save_dir = os.path.dirname(save_path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+    plt.figure(figsize=(12, 6))
+
+    plt.hist(
+        values,
+        bins=bin_edges,
+        alpha=0.7,
+        edgecolor='black',
+        label='Diff-map histogram'
+    )
+
+    plt.plot(
+        x,
+        pdf_scaled,
+        linewidth=2,
+        label=f'Normal fit (mu={mu:.3f}, sigma={sigma:.3f})'
+    )
+
+    plt.axvline(
+        threshold,
+        linestyle='--',
+        linewidth=2,
+        label=f'Threshold = {threshold:.3f}'
+    )
+
+    # === Focus only on relevant bins ===
+    plt.xlim([xmin, xmax])
+
+    plt.xlabel("Diff-map value")
+    plt.ylabel("Count")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=200)
+    plt.close()

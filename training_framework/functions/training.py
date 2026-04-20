@@ -152,10 +152,15 @@ class Trainer:
 
             # broadcast decision to all processes
             if torch.distributed.is_initialized():
-                # torch.distributed.barrier()
                 stop_tensor = torch.tensor(int(stop_training), device=self.device)
                 torch.distributed.broadcast(stop_tensor, src=0)
                 stop_training = bool(stop_tensor.item())
+
+                # Sync learning rate from master to all ranks
+                lr_tensor = torch.tensor(self.optimizer.param_groups[0]['lr'], device=self.device)
+                torch.distributed.broadcast(lr_tensor, src=0)
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = lr_tensor.item()
 
             if stop_training:
                 break

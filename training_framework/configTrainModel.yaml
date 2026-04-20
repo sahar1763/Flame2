@@ -14,6 +14,7 @@ dataloader:
 
 training:
   model_name: "resnet18"
+  freeze_backbone: false        # If true, only train the classification head (fc layer)
   lr: 0.0001
   weight_decay: 0.0001
   batch_size: 256

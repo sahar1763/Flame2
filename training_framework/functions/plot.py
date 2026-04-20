@@ -50,7 +50,7 @@ def plot_fit(fit_res: FitResult, fig=None, log_loss=False, legend=None):
         h = ax.plot(np.arange(1, len(data) + 1), data, label=legend)
         ax.set_title(attr)
         if lossacc == "loss":
-            ax.set_xlabel("Iteration #")
+            ax.set_xlabel("Epoch #")
             ax.set_ylabel("Loss")
             if log_loss:
                 ax.set_yscale("log")
