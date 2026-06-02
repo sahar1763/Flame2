@@ -192,12 +192,18 @@ def compute_diff_threshold_from_zscore(diff_map, z_score, min_threshold=0.0):
 
 
 def preprocess_images(image1, image2=None, applying=False):
-    img1 = image1.astype(np.float32)
+    if image1.dtype != np.float32:
+        img1 = image1.astype(np.float32)
+    else:
+        img1 = image1
     if applying:
         img1 = img1 - img1.mean()
     if image2 is None:
         return img1
-    img2 = image2.astype(np.float32)
+    if image2.dtype != np.float32:
+        img2 = image2.astype(np.float32)
+    else:
+        img2 = image2
     if applying:
         img2 = img2 - img2.mean()
     return img1, img2

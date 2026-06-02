@@ -144,9 +144,6 @@ class ScanManager:
         # Store the frame
         self.frames[frame_id] = frame.copy()
 
-        # Convert raw DN to temperature [°C]
-        frame = dn_to_temperature(frame)
-
         # === Step 1: Create uniform pixel points ===
         pts_image = self.points0_arrange  # shape (N, 2), order: (y, x)
 
@@ -201,6 +198,9 @@ class ScanManager:
         closing_alpha = self.config['clustering']['closing_alpha']
         half_kernel_size_x = int(np.clip(round(closing_alpha * fire_length_pixel_x / 2), 1, 15))
         half_kernel_size_y = int(np.clip(round(closing_alpha * fire_length_pixel_y / 2), 1, 15))
+
+        # Convert raw DN to temperature [°C]
+        frame = dn_to_temperature(frame)
 
         # Preprocess, cluster, and store bboxes for phase1 suppression
         image0 = preprocess_images(frame, applying=self.config['preprocessing']['apply'])
@@ -316,12 +316,12 @@ class ScanManager:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0)
 
-        # === Preprocess and compute diff-map ===
-        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
-
         # Convert raw DN to temperature [°C]
         image0_proj = dn_to_temperature(image0_proj)
         image1 = dn_to_temperature(image1)
+
+        # === Preprocess and compute diff-map ===
+        image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
 
         diff_map = compute_positive_difference(image0_proj, image1)
         diff_map[registration_mask != 1] = 0  # Zero out unregistered pixels

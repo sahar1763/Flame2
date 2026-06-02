@@ -59,7 +59,7 @@ postprocessing:
 clustering:
   closing_alpha: 0.5             # Kernel size = closing_alpha * fire_length_pixel. Controls gap-bridging between nearby active pixels
   min_cluster_pixels_ratio: 0.25          # Ratio for calc Minimum area [m^2] of active fire pixels to keep a cluster (smaller groups are discarded as noise) - will be multiplied by max_size_m^2 to get the actual pixel count threshold
-  absolute_temp_threshold: 50    # Minimum temperature value for a pixel to be considered as a decoy.
+  absolute_temp_threshold: 100    # Minimum temperature value for a pixel to be considered as a decoy.
   diff_z_score: 3.5              # Z-score threshold for diff-map activation: threshold = mean + z_score * std
   min_contrast: 2              # Z score (in std terms) for Minimum contrast for selecting cluster centers - sigma
 

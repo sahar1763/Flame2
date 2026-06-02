@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
 
     name='wildfire_detector',
-    version='0.1.7', # Phase 1 diff pipeline with z score clustering
+    version='0.1.8', # Phase 1 diff pipeline with z score clustering
     packages=find_packages(),
 
     install_requires=[
