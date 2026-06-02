@@ -146,6 +146,9 @@ class ScanManager:
         # Store the frame
         self.frames[frame_id] = frame.copy()
 
+        # Convert raw DN to temperature [°C]
+        frame = dn_to_temperature(frame)
+
         # === Step 1: Create uniform pixel points ===
         pts_image = self.points0_arrange
 
@@ -183,23 +186,29 @@ class ScanManager:
         hfov = metadata["payload"]["field_of_view_deg"]  # [deg]
         # Fire Max Size (length)
         fire_size = self.config['fire']['max_size_m']  # [m]
-        # Important Calculation
+        # Worst-case GSD calculation (oblique viewing, pinhole model)
         ir_height, ir_width = self.config['image']['ir_size']
-        Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
-        IFOV = hfov / ir_width / 180 * np.pi  # Instantaneous Field of View [urad]
-        GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
-        fire_length_pixel = np.max([np.floor(fire_size / GSD),1]) # if expected fire below 1 pixel search for fire of at least 1 pixel
+        gsd_x_max, gsd_y_max = compute_worst_case_gsd(
+            h=drone_height, theta_deg=projection_angle,
+            hfov_deg=hfov, n_y=ir_height, n_x=ir_width
+        )
+        # Conservative fire size estimate using worst-case pixel area
+        fire_num_pixel = max(9, int(np.floor(fire_size**2 / (gsd_x_max * gsd_y_max))))
+        fire_length_pixel_x = max(3, int(np.floor(fire_size / gsd_x_max)))
+        fire_length_pixel_y = max(3, int(np.floor(fire_size / gsd_y_max)))
 
         # Compute clustering parameters based on estimated fire characteristics
         closing_alpha = self.config['clustering']['closing_alpha']
-        half_kernel_size = int(np.clip(round(closing_alpha * fire_length_pixel / 2), 1, 15))
+        half_kernel_size_x = int(np.clip(round(closing_alpha * fire_length_pixel_x / 2), 1, 15))
+        half_kernel_size_y = int(np.clip(round(closing_alpha * fire_length_pixel_y / 2), 1, 15))
 
         # Preprocess, cluster, and store bboxes for phase1 suppression
         image0 = preprocess_images(frame, applying=self.config['preprocessing']['apply'])
         _, _, image0_bboxes_pixels = find_cluster_centers_conditional(
             diff_map=image0,
             threshold=self.config['clustering']['absolute_temp_threshold'],
-            half_kernel_size=half_kernel_size,
+            half_kernel_size_x=half_kernel_size_x,
+            half_kernel_size_y=half_kernel_size_y,
             min_samples=1,
             min_contrast=self.config['clustering']['min_contrast']
         )
@@ -252,15 +261,19 @@ class ScanManager:
         # Clustering parameters
         closing_alpha = self.config['clustering']['closing_alpha']
         min_cluster_pixels_ratio = self.config['clustering']['min_cluster_pixels_ratio']
-        # Important Calculation
+        # Worst-case GSD calculation (oblique viewing, pinhole model)
         rgb_height, rgb_width = self.config['image']['rgb_size']  # [height, width]
         ir_height, ir_width = self.config['image']['ir_size']
-        Slant_Range = drone_height / np.cos(np.deg2rad(projection_angle))  # Slant range from camera to ground (meters)
-        IFOV = hfov / ir_width / 180 * np.pi  # Instantaneous Field of View [urad]
-        GSD = Slant_Range * IFOV  # Ground Sampling Distance [meters per pixel]
+        gsd_x_max, gsd_y_max = compute_worst_case_gsd(
+            h=drone_height, theta_deg=projection_angle,
+            hfov_deg=hfov, n_y=ir_height, n_x=ir_width
+        )
+        pixel_area_m2 = gsd_x_max * gsd_y_max
 
-        fire_length_pixel = np.max([np.floor(fire_size / GSD),1]) # if expected fire below 1 pixel search for fire of at least 1 pixel
-        fire_num_pixel = fire_length_pixel ** 2
+        # Conservative fire size estimate using worst-case pixel area
+        fire_num_pixel = max(9, int(np.floor(fire_size**2 / pixel_area_m2)))
+        fire_length_pixel_x = max(3, int(np.floor(fire_size / gsd_x_max)))
+        fire_length_pixel_y = max(3, int(np.floor(fire_size / gsd_y_max)))
 
         # FOV calc for Phase 2
         ratio_image = self.config['fire']['ratio_in_rgb_image']  # fire ratio within the RGB image
@@ -294,11 +307,25 @@ class ScanManager:
         image0_proj = cv2.warpPerspective(image0, H_img0_to_img1, (image1.shape[1], image1.shape[0]),
                                           flags=cv2.INTER_LINEAR,
                                           borderMode=cv2.BORDER_CONSTANT,
-                                          borderValue=np.mean(image0))
+                                          borderValue=0)
+
+        # === Registration mask: 1 where image0 projects onto image1, 0 at unregistered borders ===
+        registration_mask = cv2.warpPerspective(
+            np.ones(image0.shape[:2], dtype=np.uint8), H_img0_to_img1,
+            (image1.shape[1], image1.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0)
 
         # === Preprocess and compute diff-map ===
         image1, image0_proj = preprocess_images(image1, image0_proj, applying=self.config['preprocessing']['apply'])
+
+        # Convert raw DN to temperature [°C]
+        image0_proj = dn_to_temperature(image0_proj)
+        image1 = dn_to_temperature(image1)
+
         diff_map = compute_positive_difference(image0_proj, image1)
+        diff_map[registration_mask != 1] = 0  # Zero out unregistered pixels
         diff_map = postprocess_difference_map(diff_map, image1,
                                               threshold=self.config['postprocessing']['threshold'],
                                               temp_threshold=self.config['postprocessing']['temp_threshold'])
@@ -306,7 +333,7 @@ class ScanManager:
         # === Suppress phase0 bboxes on diff-map ===
         if len(bboxes_pixels0) > 0:
             suppress_margin_m = self.config['phase1']['suppress_bbox_margin_m']
-            margin_px = int(np.ceil(suppress_margin_m / GSD))
+            margin_px = int(np.ceil(suppress_margin_m / min(gsd_x_max, gsd_y_max)))
             projected_bboxes = project_bboxes_with_homography(bboxes_pixels0, H_img0_to_img1)
             suppress_bboxes_on_diff_map(diff_map, projected_bboxes, margin_px=margin_px)
 
@@ -325,12 +352,14 @@ class ScanManager:
         # )
 
         # === Clustering on diff-map ===
-        half_kernel_size = int(np.clip(round(closing_alpha * fire_length_pixel / 2), 1, 15))
+        half_kernel_size_x = int(np.clip(round(closing_alpha * fire_length_pixel_x / 2), 1, 15))
+        half_kernel_size_y = int(np.clip(round(closing_alpha * fire_length_pixel_y / 2), 1, 15))
         min_cluster_pixels = max(1, int(np.floor(min_cluster_pixels_ratio * fire_num_pixel))) # at least 1 pixel in cluster
         centers_pixels, label_map, bboxes_pixels = find_cluster_centers_conditional(
             diff_map=diff_map,
             threshold=diff_threshold,
-            half_kernel_size=half_kernel_size,
+            half_kernel_size_x=half_kernel_size_x,
+            half_kernel_size_y=half_kernel_size_y,
             min_samples=min_cluster_pixels,
             min_contrast=self.config['clustering']['min_contrast']
         )
@@ -347,7 +376,7 @@ class ScanManager:
         bboxes_pixels = np.array(bboxes_pixels)
 
         # === Compute cluster info and scores ===
-        cluster_info = compute_cluster_size_maxval(label_map, image1, GSD)
+        cluster_info = compute_cluster_size_maxval(label_map, image1, pixel_area_m2)
         scores = compute_cluster_scores(
             cluster_info,
             norm_size=self.config['scoring']['norm_size'],

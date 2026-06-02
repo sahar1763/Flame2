@@ -434,16 +434,18 @@ def Creating_Phase1_input(PHI, THETA, x0, y0, h0, hfov0, metadata, config):
         phi1 = phi + random.gauss(0, phi_std)
         hfov1 = hfov0 + random.gauss(0, hfov_std)
 
-        # Important Calculation
+        # Worst-case GSD calculation (oblique viewing, pinhole model)
         rgb_height, rgb_width = config['image']['rgb_size']  # [height, width]
         ir_height, ir_width = config['image']['ir_size']
-        Slant_Range = h1 * 0.001 / np.cos(np.deg2rad(phi1))  # Slant range from camera to ground (meters)
-        HFOV = hfov1  # Horizontal field of view (degrees)
-        IFOV = HFOV / ir_width / 180 * np.pi * 1_000_000  # Instantaneous Field of View [urad]
-        GSD = Slant_Range * IFOV / 1000  # Ground Sampling Distance [meters per pixel]
+        gsd_x_max, gsd_y_max = compute_worst_case_gsd(
+            h=h1, theta_deg=phi1,
+            hfov_deg=hfov1, n_y=ir_height, n_x=ir_width
+        )
+        pixel_area_m2 = gsd_x_max * gsd_y_max
 
-        fire_length_pixel = np.floor(fire_size / GSD)
-        fire_num_pixel = fire_length_pixel**2
+        # Conservative fire size estimate using worst-case pixel area
+        fire_num_pixel = max(9, int(np.floor(fire_size**2 / pixel_area_m2)))
+        fire_length_pixel = max(3, int(np.floor(np.sqrt(fire_num_pixel))))
 
         # Creating frame 1 (scan 1)
         image1, clusters_num, cluster_centers = Creating_Scan1_Frame(fire_length_pixel, config['image']['ir_size'])

@@ -4,6 +4,49 @@ from scipy.spatial.transform import Rotation as R
 import time
 
 
+# ============================================================
+# DN → Temperature Conversion (calibrated IR camera)
+# ============================================================
+# T = (1.0893 + sqrt(0.0296*DN - 2.349)) / 0.0148
+# For DN < 80: T = 82.9 °C (domain constraint: sqrt argument < 0)
+
+def _build_dn_to_temperature_lut(dn_max=255):
+    """
+    Pre-compute a lookup table mapping DN values [0..dn_max] to temperature [°C].
+    Uses the calibration equation. For DN < 80, temperature is clamped to 82.9°C.
+    """
+    dn = np.arange(dn_max + 1, dtype=np.float32)
+    sqrt_arg = 0.0296 * dn - 2.349
+    # Clip negative values (DN < ~79.4) to 0 before sqrt, then override with constant
+    sqrt_arg_safe = np.maximum(sqrt_arg, 0.0)
+    temperature = (1.0893 + np.sqrt(sqrt_arg_safe)) / 0.0148
+    # Clamp DN < 80 to fixed temperature
+    temperature[dn < 80] = 82.9
+    return temperature
+
+
+# Global LUT — built once at import, zero-cost per-frame conversion
+DN_TO_TEMP_LUT = _build_dn_to_temperature_lut(dn_max=255)
+
+
+def dn_to_temperature(frame):
+    """
+    Convert a raw IR frame (uint8 DN) to temperature [°C] using a pre-built LUT.
+    Single array-index operation — O(1) per pixel, no per-pixel math.
+
+    Parameters
+    ----------
+    frame : ndarray, dtype uint8, shape (H, W)
+        Raw digital number image from the IR sensor.
+
+    Returns
+    -------
+    ndarray, dtype float32, shape (H, W)
+        Temperature image in degrees Celsius.
+    """
+    return DN_TO_TEMP_LUT[frame]
+
+
 def create_homography(src_yx, dst_yx):
     """
     Compute a homography from (y, x) source points to (y, x) destination points.
@@ -192,7 +235,8 @@ def postprocess_difference_map(diff, img2, threshold=None, temp_threshold=None):
 def find_cluster_centers_conditional(
     diff_map,
     threshold=10,
-    half_kernel_size=1.5,
+    half_kernel_size_x=1,
+    half_kernel_size_y=1,
     min_samples=2,
     min_contrast=10
 ):
@@ -201,11 +245,15 @@ def find_cluster_centers_conditional(
     if mask.sum() == 0:
         return [], [], []
 
-    # Morphological closing
-    half_kernel_size_int = int(round(half_kernel_size))
-    if half_kernel_size_int >= 1:
-        kernel_size = 2 * half_kernel_size_int + 1
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    # Morphological closing with rectangular kernel (accounts for non-uniform GSD)
+    hk_x = int(round(half_kernel_size_x))
+    hk_y = int(round(half_kernel_size_y))
+    if hk_x >= 1 or hk_y >= 1:
+        hk_x = max(hk_x, 1)
+        hk_y = max(hk_y, 1)
+        kernel_w = 2 * hk_x + 1  # width (x direction, columns)
+        kernel_h = 2 * hk_y + 1  # height (y direction, rows)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h))
         grouped = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     else:
         grouped = mask
@@ -280,7 +328,7 @@ def find_cluster_centers_conditional(
     return centers, label_map, bboxes
 
 
-def compute_cluster_size_maxval(label_map, image, gsd):
+def compute_cluster_size_maxval(label_map, image, pixel_area_m2):
     cluster_info = {}
 
     flat_labels = label_map.ravel()
@@ -306,7 +354,7 @@ def compute_cluster_size_maxval(label_map, image, gsd):
             mean_vals[label] = 0
 
     for label in range(len(counts)):
-        size_m2 = int(counts[label]) * gsd**2
+        size_m2 = int(counts[label]) * pixel_area_m2
         cluster_info[label] = {
             "size": size_m2,
             "max_val": float(max_vals[label]),
@@ -399,6 +447,60 @@ def generate_uniform_grid(h, w, points_num):
     points = np.array([(y, x) for y in ys for x in xs])
 
     return points
+
+
+def compute_worst_case_gsd(h, theta_deg, hfov_deg, n_y, n_x):
+    """
+    Compute worst-case (maximum) GSD in x and y directions under oblique viewing.
+
+    Based on a pinhole camera model with locally flat ground plane.
+    The worst-case vertical GSD occurs at the far edge of the image (phi = VFOV/2),
+    and the worst-case horizontal GSD at the far row and horizontal edge (psi = HFOV/2).
+
+    Formulation:
+        GSD_y_max ≈ h * [tan(θ + VFOV/2) - tan(θ + VFOV/2 - VFOV/N_y)]
+        GSD_x_max ≈ h / cos(θ + VFOV/2) * [tan(HFOV/2) - tan(HFOV/2 - HFOV/N_x)]
+
+    Parameters
+    ----------
+    h : float
+        Flight altitude [meters].
+    theta_deg : float
+        Payload viewing angle from nadir [degrees]. 0 = looking straight down.
+    hfov_deg : float
+        Horizontal field of view [degrees].
+    n_y : int
+        Image height in pixels.
+    n_x : int
+        Image width in pixels.
+
+    Returns
+    -------
+    gsd_x_max : float
+        Worst-case horizontal GSD [meters/pixel].
+    gsd_y_max : float
+        Worst-case vertical GSD [meters/pixel].
+    """
+    theta = np.radians(theta_deg)
+    hfov = np.radians(hfov_deg)
+
+    # Compute VFOV from HFOV using sensor aspect ratio
+    aspect_ratio = n_y / n_x
+    vfov = 2 * np.arctan(np.tan(hfov / 2) * aspect_ratio)
+
+    # Far-edge vertical angle (clip to avoid degenerate past-horizontal cases)
+    far_edge_angle = theta + vfov / 2
+    max_valid_angle = np.radians(89.0)
+    far_edge_angle = min(far_edge_angle, max_valid_angle)
+
+    # Worst-case vertical GSD at far edge (phi = VFOV/2)
+    gsd_y_max = h * (np.tan(far_edge_angle) - np.tan(far_edge_angle - vfov / n_y))
+
+    # Worst-case horizontal GSD at far row and horizontal edge (psi = HFOV/2)
+    psi_max = hfov / 2
+    gsd_x_max = (h / np.cos(far_edge_angle)) * (np.tan(psi_max) - np.tan(psi_max - hfov / n_x))
+
+    return gsd_x_max, gsd_y_max
 
 
 def camera_angle_from_vertical(
