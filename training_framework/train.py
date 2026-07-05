@@ -168,9 +168,11 @@ def main(config_path: str):
     elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
         num_ftrs = model.classifier[-1].in_features
         model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
-    elif "densenet" in model_name.lower():
-        num_ftrs = model.classifier.in_features
-        model.classifier = nn.Linear(num_ftrs, num_classes)
+    elif "mobilenet" in model_name.lower():
+        num_ftrs = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(num_ftrs, num_classes)
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
 
     # Optionally freeze backbone — only train the classification head
     if config["training"].get("freeze_backbone", False):
@@ -183,8 +185,8 @@ def main(config_path: str):
         elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
             for param in model.classifier[-1].parameters():
                 param.requires_grad = True
-        elif "densenet" in model_name.lower():
-            for param in model.classifier.parameters():
+        elif "mobilenet" in model_name.lower():
+            for param in model.classifier[1].parameters():
                 param.requires_grad = True
         if is_master:
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

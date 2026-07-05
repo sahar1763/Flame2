@@ -84,10 +84,12 @@ scoring:
 # ---------------------------------------------------
 
 phase2:
-  trt_engine: "best_model_fp16.trt"  # TensorRT engine filename (inside package/models/)
+  trt_precision: "fp16"               # TensorRT precision: "fp16" or "int8"
+  trt_engine_fp16: "best_model_fp16.trt"   # FP16 engine filename (inside package)
+  trt_engine_int8: "best_model_int8.trt"   # INT8 engine filename (inside package)
   net_image_size: 224                 # Input size expected by the classification network (in pixels) # TODO: Change
   crop_factors: [1.2247, 1.4142, 2.0] # Factors used to crop around detected fire regions at multiple scales
-  model_name: "resnet18"
+  model_name: "resnet18"              # Options: resnet18, resnet34, resnet50, alexnet, vgg16, mobilenet_v2
 
 # ---------------------------------------------------
 # Detector Client parameters

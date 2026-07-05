@@ -55,6 +55,39 @@ def evaluate_model(model, dataloader, device, label_names, save_dir):
     report_df.to_csv(report_csv_path)
     print(f"Saved classification report to {report_csv_path}")
 
+    # --- Evaluation metrics ---
+    TN, FP, FN, TP = cm[0, 0], cm[0, 1], cm[1, 0], cm[1, 1]
+    fire_precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    fire_recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+    fire_f1 = 2 * fire_precision * fire_recall / (fire_precision + fire_recall) if (fire_precision + fire_recall) > 0 else 0.0
+    fpr_val = FP / (FP + TN) if (FP + TN) > 0 else 0.0
+    fnr_val = FN / (FN + TP) if (FN + TP) > 0 else 0.0
+
+    print("\n" + "=" * 50)
+    print("MODEL EVALUATION SUMMARY")
+    print("=" * 50)
+    print(f"  Accuracy:           {accuracy*100:.2f}%")
+    print(f"  Fire Precision:     {fire_precision*100:.2f}%")
+    print(f"  Fire Recall:        {fire_recall*100:.2f}%")
+    print(f"  Fire F1-score:      {fire_f1*100:.2f}%")
+    print(f"  False Positive Rate:{fpr_val*100:.2f}%")
+    print(f"  False Negative Rate:{fnr_val*100:.2f}%")
+    print("=" * 50)
+
+    # Save evaluation summary to CSV
+    summary_df = pd.DataFrame([{
+        "model": os.path.basename(save_dir.rstrip("/\\").rsplit("test", 1)[0].rstrip("/\\")),
+        "accuracy": round(accuracy * 100, 2),
+        "fire_precision": round(fire_precision * 100, 2),
+        "fire_recall": round(fire_recall * 100, 2),
+        "fire_f1": round(fire_f1 * 100, 2),
+        "false_positive_rate": round(fpr_val * 100, 2),
+        "false_negative_rate": round(fnr_val * 100, 2),
+    }])
+    summary_path = os.path.join(save_dir, "evaluation_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Saved evaluation summary to {summary_path}")
+
     # Save predictions to CSV
     df_preds = pd.DataFrame({
         "image": image_names,
@@ -106,9 +139,11 @@ def main(experiment_path):
     elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
         num_ftrs = model.classifier[-1].in_features
         model.classifier[-1] = nn.Linear(num_ftrs, num_classes)
-    elif "densenet" in model_name.lower():
-        num_ftrs = model.classifier.in_features
-        model.classifier = nn.Linear(num_ftrs, num_classes)
+    elif "mobilenet" in model_name.lower():
+        num_ftrs = model.classifier[1].in_features
+        model.classifier[1] = nn.Linear(num_ftrs, num_classes)
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
     model = model.to(device)
 
     model.load_state_dict(checkpoint["model_state"])

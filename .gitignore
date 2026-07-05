@@ -98,6 +98,8 @@ dataset/class_0/
 dataset/class_1/
 dataset/class_2/
 dataset_FOR_IAI/c_1/
+Seperated_Dataset/
+UnifiedDataset.zip
 *.jpg
 *.json
 *.pt
@@ -108,6 +110,7 @@ results/
 results0/
 dataset_FOR_IAI/
 results_demoPackage/
+debug_outputs/
 wandb/
 
 *.VOB
@@ -116,3 +119,11 @@ results2/
 videos_Thesis/Videos/
 videos_Thesis/ProcessedVideos/
 experiments/
+
+
+# Phase 2 evaluation results
+Phase2_Verification/benchmark_results/
+Phase2_Verification/benchmark_results_demo/
+Phase2_Verification/figures_demo/
+Phase2_Verification/results_demoPackage/
+Phase2_Verification/visualizations/

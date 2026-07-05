@@ -13,6 +13,7 @@ dataloader:
   persistent_workers: true
 
 training:
+  # Supported models: alexnet, vgg16, resnet18, resnet34, resnet50, mobilenet_v2
   model_name: "resnet18"
   freeze_backbone: false        # If true, only train the classification head (fc layer)
   lr: 0.0001

@@ -22,7 +22,8 @@ import shutil
 
 
 class ScanManager:
-    def __init__(self, config_path=None):
+    def __init__(self, config_path=None, verbose=True):
+        self.verbose = verbose
         # Load config.yaml from package
         if config_path is None:
             with pkg_resources.open_text(__package__, "config.yaml") as f:
@@ -453,6 +454,7 @@ class ScanManager:
     def _phase2_inner(self, image1: np.ndarray, metadata: dict):
         # Using transformation function to convert World coordinates to RGB image coordinates
         tt0 = time.perf_counter()
+        timings = {}
 
         # === 3. Define bbox
         # bbox_pixels = (960-140, 540-140, 960+140, 540+140)  # example bounding box
@@ -489,20 +491,28 @@ class ScanManager:
         # Original (unfixed) bbox
         bbox_pixels_raw = (y_min, x_min, y_max, x_max)
 
-        valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
+        timings['input_and_metadata'] = time.perf_counter() - tt0
 
-        # === 4. Define crop factors and transformation
+        # === Stage 2: Region validation ===
+        t_region = time.perf_counter()
+        valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
+        timings['region_validation'] = time.perf_counter() - t_region
+
+        # === Stage 3: Multi-scale crop extraction ===
         crop_factors = self.config['phase2']['crop_factors']
         image_size = self.config['phase2']['net_image_size']
 
-        # Convert and Resize INDIVIDUALLY to ensure they match
-        resized_tensors = []
+        t_crop = time.perf_counter()
         cropped_images_np = []
         for crop_factor in crop_factors:
-
             cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=image_size)
             cropped_images_np.append(cropped_np)
+        timings['crop_extraction'] = time.perf_counter() - t_crop
 
+        # === Stage 4: Resize and preprocessing ===
+        t_resize = time.perf_counter()
+        resized_tensors = []
+        for cropped_np in cropped_images_np:
             # NumPy [H, W, C] -> Tensor [C, H, W]
             t = torch.from_numpy(cropped_np).permute(2, 0, 1).float()
 
@@ -515,7 +525,10 @@ class ScanManager:
             ).squeeze(0)
 
             resized_tensors.append(t)
+        timings['resize_and_preprocess'] = time.perf_counter() - t_resize
 
+        # === Stage 5: Batch construction and normalization ===
+        t_batch = time.perf_counter()
         test_tensors = torch.stack(resized_tensors)  # Shape: [3, 3, image_size, image_size]
 
         # Final Normalization (Vectorized and Fast)
@@ -523,18 +536,29 @@ class ScanManager:
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         test_tensors = (test_tensors - mean) / std
+        timings['batch_construction'] = time.perf_counter() - t_batch
 
         total_time = time.perf_counter() - tt0
-        print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
+        if getattr(self, 'verbose', True):
+            print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
-        final_label, avg_conf = predict_crops_majority_vote_RT(
+        # === Stage 6 & 7: Model inference + Majority vote (split inside function) ===
+        t_infer = time.perf_counter()
+        final_label, avg_conf, infer_timings = predict_crops_majority_vote_RT(
             crops=test_tensors,
             model=self.model,
             bbox=bbox_pixels,
             original_image=image1,
             crops_np=cropped_images_np,
-            plot=False
+            plot=False,
+            verbose=getattr(self, 'verbose', True),
+            crop_factors=crop_factors
         )
+        timings['model_inference'] = infer_timings.get('inference', time.perf_counter() - t_infer)
+        timings['majority_vote'] = infer_timings.get('postprocess', 0.0)
+
+        timings['total'] = time.perf_counter() - tt0
+        self.last_phase2_timings = timings
 
         # Output is different in demo mode according to debug results # TODO : optional, convert to geo and adjust return
         result = {
@@ -543,9 +567,10 @@ class ScanManager:
             "bbox": bbox
         } # Not same as in the real code
 
-        print("Final Prediction:", result["final_prediction"])
-        print("Confidence:", f"{result['confidence']:.2f}")
-        print("BBox:", result["bbox"])
+        if getattr(self, 'verbose', True):
+            print("Final Prediction:", result["final_prediction"])
+            print("Confidence:", f"{result['confidence']:.2f}")
+            print("BBox:", result["bbox"])
 
         return result
 
@@ -599,19 +624,36 @@ class ScanManager:
         Loads the existing TensorRT engine file, or builds it from the ONNX file located
         inside the wildfire_detector package using trtexec.
 
+        Reads config.yaml -> phase2.trt_precision to determine FP16 or INT8.
+        For INT8: expects a pre-built engine (use build_int8_engine.py to create it).
+        For FP16: will auto-build from ONNX if engine file not found.
+
         Returns:
             str: Path to the .trt engine file inside the package
         """
         package_root = pkg_resources.files("wildfire_detector")
         onnx_path = str(package_root / "best_model.onnx")
-        engine_path = str(package_root / "best_model_fp16.trt")
         net_image_size = self.config['phase2']['net_image_size']
+        precision = self.config['phase2'].get('trt_precision', 'fp16').lower()
 
-        if os.path.exists(engine_path):
-            print(f"[TRT] Found existing engine at: {engine_path}")
+        if precision == "int8":
+            engine_path = str(package_root / self.config['phase2'].get('trt_engine_int8', 'best_model_int8.trt'))
+            if not os.path.exists(engine_path):
+                raise FileNotFoundError(
+                    f"[TRT] INT8 engine not found at: {engine_path}\n"
+                    f"Build it using: python build_int8_engine.py --calib_dir <path_to_calibration_images>"
+                )
+            print(f"[TRT] Found INT8 engine at: {engine_path}")
             return engine_path
 
-        print("[TRT] Building TensorRT engine...")
+        # FP16 (default)
+        engine_path = str(package_root / self.config['phase2'].get('trt_engine_fp16', 'best_model_fp16.trt'))
+
+        if os.path.exists(engine_path):
+            print(f"[TRT] Found existing FP16 engine at: {engine_path}")
+            return engine_path
+
+        print("[TRT] Building FP16 TensorRT engine...")
 
         build_cmd = [
             "/usr/src/tensorrt/bin/trtexec",
@@ -631,7 +673,7 @@ class ScanManager:
         if result.returncode != 0:
             raise RuntimeError(f"[TRT] Engine build failed:\n{result.stderr}")
 
-        print(f"[TRT] Engine built in {duration:.1f}s and saved to: {engine_path}")
+        print(f"[TRT] FP16 engine built in {duration:.1f}s and saved to: {engine_path}")
         return engine_path
 
 # ---------------------------------------------------------------------------

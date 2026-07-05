@@ -81,9 +81,11 @@ class ScanManager:
         elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
             num_ftrs = model.classifier[-1].in_features
             model.classifier[-1] = torch.nn.Linear(num_ftrs, num_classes)
-        elif "densenet" in model_name.lower():
-            num_ftrs = model.classifier.in_features
-            model.classifier = torch.nn.Linear(num_ftrs, num_classes)
+        elif "mobilenet" in model_name.lower():
+            num_ftrs = model.classifier[1].in_features
+            model.classifier[1] = torch.nn.Linear(num_ftrs, num_classes)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}")
 
         model.load_state_dict(checkpoint["model_state"])
         model = model.to(self.device)
@@ -502,6 +504,7 @@ class ScanManager:
     def _phase2_inner(self, image1: np.ndarray, metadata: dict):
         # Using transformation function to convert World coordinates to RGB image coordinates
         tt0 = time.perf_counter()
+        timings = {}
 
         # === 3. Define bbox
         # Prepare transformation matrix
@@ -550,20 +553,31 @@ class ScanManager:
         # Original (unfixed) bbox
         bbox_pixels_raw = (y_min, x_min, y_max, x_max)
 
+        timings['input_and_metadata'] = time.perf_counter() - tt0
+
+        # === Stage 2: Region validation ===
+        t_region = time.perf_counter()
         valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
+        timings['region_validation'] = time.perf_counter() - t_region
 
         # === 4. Define crop factors and transformation
         crop_factors = self.config['phase2']['crop_factors']
         image_size = self.config['phase2']['net_image_size']
 
         # Convert and Resize INDIVIDUALLY to ensure they match
-        resized_tensors = []
+        # === Stage 3: Crop extraction ===
+        t_crop = time.perf_counter()
         cropped_images_np = []
         for crop_factor in crop_factors:
 
             cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=image_size)
             cropped_images_np.append(cropped_np)
+        timings['crop_extraction'] = time.perf_counter() - t_crop
 
+        # === Stage 4: Resize and preprocess ===
+        t_resize = time.perf_counter()
+        resized_tensors = []
+        for cropped_np in cropped_images_np:
             # NumPy [H, W, C] -> Tensor [C, H, W]
             t = torch.from_numpy(cropped_np).permute(2, 0, 1).float()
 
@@ -576,7 +590,9 @@ class ScanManager:
             ).squeeze(0)
 
             resized_tensors.append(t)
+        timings['resize_and_preprocess'] = time.perf_counter() - t_resize
 
+        t_batch = time.perf_counter()
         test_tensors = torch.stack(resized_tensors)  # Shape: [3, 3, image_size, image_size]
 
         # Final Normalization (Vectorized and Fast)
@@ -584,11 +600,13 @@ class ScanManager:
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         test_tensors = (test_tensors - mean) / std
+        timings['batch_construction'] = time.perf_counter() - t_batch
 
         total_time = time.perf_counter() - tt0
         print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
-        final_label, avg_conf = predict_crops_majority_vote(
+        t_infer = time.perf_counter()
+        final_label, avg_conf, infer_timings = predict_crops_majority_vote(
             crops=test_tensors,
             model=self.model,
             bbox=bbox_pixels,
@@ -597,6 +615,11 @@ class ScanManager:
             crops_np=cropped_images_np,
             plot=False
         )
+        timings['model_inference'] = infer_timings.get('inference', time.perf_counter() - t_infer)
+        timings['majority_vote'] = infer_timings.get('postprocess', 0)
+
+        timings['total'] = time.perf_counter() - tt0
+        self.last_phase2_timings = timings
 
         result = {
             "fire_existence": final_label, # 1 - Fire, 0 - No Fire

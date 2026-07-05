@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from torchvision import transforms, models
 from PIL import Image
 import yaml
@@ -16,7 +18,8 @@ from wildfire_detector.utils_phase2_flow import *
 from wildfire_detector.utils_simulation import *
 
 class ScanManager:
-    def __init__(self, config_path=None):
+    def __init__(self, config_path=None, verbose=True):
+        self.verbose = verbose
         # Load config.yaml from package
         if config_path is None:
             with pkg_resources.open_text(__package__, "config.yaml") as f:
@@ -82,9 +85,11 @@ class ScanManager:
         elif "vgg" in model_name.lower() or "alexnet" in model_name.lower():
             num_ftrs = model.classifier[-1].in_features
             model.classifier[-1] = torch.nn.Linear(num_ftrs, num_classes)
-        elif "densenet" in model_name.lower():
-            num_ftrs = model.classifier.in_features
-            model.classifier = torch.nn.Linear(num_ftrs, num_classes)
+        elif "mobilenet" in model_name.lower():
+            num_ftrs = model.classifier[1].in_features
+            model.classifier[1] = torch.nn.Linear(num_ftrs, num_classes)
+        else:
+            raise ValueError(f"Unsupported model: {model_name}")
 
         model.load_state_dict(checkpoint["model_state"])
         model = model.to(self.device)
@@ -292,6 +297,8 @@ class ScanManager:
         )
         pixel_area_m2 = gsd_x_max * gsd_y_max
 
+        print(f"gsd_x_max: {gsd_x_max}, gsd_y_max: {gsd_y_max}") #TODO: erase later
+
         # Conservative fire size estimate using worst-case pixel area
         fire_num_pixel = max(9, int(np.floor(fire_size**2 / pixel_area_m2)))
         fire_length_pixel_x = max(3, int(np.floor(fire_size / gsd_x_max)))
@@ -479,6 +486,7 @@ class ScanManager:
     def _phase2_inner(self, image1: np.ndarray, metadata: dict):
         # Using transformation function to convert World coordinates to RGB image coordinates
         tt0 = time.perf_counter()
+        timings = {}
 
         # === 3. Define bbox
         # bbox_pixels = (960-140, 540-140, 960+140, 540+140)  # example bounding box
@@ -515,20 +523,28 @@ class ScanManager:
         # Original (unfixed) bbox
         bbox_pixels_raw = (y_min, x_min, y_max, x_max)
 
-        valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
+        timings['input_and_metadata'] = time.perf_counter() - tt0
 
-        # === 4. Define crop factors and transformation
+        # === Stage 2: Region validation ===
+        t_region = time.perf_counter()
+        valid_scan, bbox_pixels = self._valid_phase2(bbox_pixels_raw, rgb_height, rgb_width)
+        timings['region_validation'] = time.perf_counter() - t_region
+
+        # === Stage 3: Multi-scale crop extraction ===
         crop_factors = self.config['phase2']['crop_factors']
         image_size = self.config['phase2']['net_image_size']
 
-        # Convert and Resize INDIVIDUALLY to ensure they match
-        resized_tensors = []
+        t_crop = time.perf_counter()
         cropped_images_np = []
         for crop_factor in crop_factors:
-
             cropped_np = crop_bbox_scaled(image1, bbox_pixels, crop_factor, min_cropsize=image_size)
             cropped_images_np.append(cropped_np)
+        timings['crop_extraction'] = time.perf_counter() - t_crop
 
+        # === Stage 4: Resize and preprocessing ===
+        t_resize = time.perf_counter()
+        resized_tensors = []
+        for cropped_np in cropped_images_np:
             # NumPy [H, W, C] -> Tensor [C, H, W]
             t = torch.from_numpy(cropped_np).permute(2, 0, 1).float()
 
@@ -541,7 +557,10 @@ class ScanManager:
             ).squeeze(0)
 
             resized_tensors.append(t)
+        timings['resize_and_preprocess'] = time.perf_counter() - t_resize
 
+        # === Stage 5: Batch construction and normalization ===
+        t_batch = time.perf_counter()
         test_tensors = torch.stack(resized_tensors)  # Shape: [3, 3, image_size, image_size]
 
         # Final Normalization (Vectorized and Fast)
@@ -549,19 +568,30 @@ class ScanManager:
         mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         test_tensors = (test_tensors - mean) / std
+        timings['batch_construction'] = time.perf_counter() - t_batch
 
         total_time = time.perf_counter() - tt0
-        print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
+        if getattr(self, 'verbose', True):
+            print(f"\n=== Inference Timing for Preprocess and Cropping === {total_time * 1000:.2f} msec\n")
 
-        final_label, avg_conf = predict_crops_majority_vote(
+        # === Stage 6 & 7: Model inference + Majority vote (split inside function) ===
+        t_infer = time.perf_counter()
+        final_label, avg_conf, infer_timings = predict_crops_majority_vote(
             crops=test_tensors,
             model=self.model,
             bbox=bbox_pixels,
             device=self.device,
             original_image=image1,
             crops_np=cropped_images_np,
-            plot=True
+            plot=getattr(self, 'verbose', True),
+            verbose=getattr(self, 'verbose', True),
+            crop_factors=crop_factors
         )
+        timings['model_inference'] = infer_timings.get('inference', time.perf_counter() - t_infer)
+        timings['majority_vote'] = infer_timings.get('postprocess', 0.0)
+
+        timings['total'] = time.perf_counter() - tt0
+        self.last_phase2_timings = timings
 
         # Output is different in demo mode according to debug results # TODO : optional, convert to geo and adjust return
         result = {
@@ -570,9 +600,10 @@ class ScanManager:
             "bbox": bbox
         } # Not same as in the real code
 
-        print("Final Prediction:", result["final_prediction"])
-        print("Confidence:", f"{result['confidence']:.2f}")
-        print("BBox:", result["bbox"])
+        if getattr(self, 'verbose', True):
+            print("Final Prediction:", result["final_prediction"])
+            print("Confidence:", f"{result['confidence']:.2f}")
+            print("BBox:", result["bbox"])
 
         return result
 

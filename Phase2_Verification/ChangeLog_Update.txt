@@ -1,0 +1,402 @@
+================================================================================
+CHANGES SUMMARY: INT8 TensorRT Support + Benchmark Visualization + Verbose Flag
+================================================================================
+Date: June 12, 2026
+Scope: Sections 5.1–5.6 of the thesis (Chapter 5 Results)
+
+================================================================================
+1. wildfire_detector/config.yaml
+================================================================================
+WHAT CHANGED:
+  - Removed old single key: trt_engine: "best_model_fp16.trt"
+  - Added three new keys under phase2:
+      trt_precision: "fp16"               # Controls which engine to load ("fp16" or "int8")
+      trt_engine_fp16: "best_model_fp16.trt"
+      trt_engine_int8: "best_model_int8.trt"
+
+WHY:
+  Previously only FP16 was supported. Now the config controls whether
+  ScanManager loads the FP16 or INT8 engine at init time.
+
+
+================================================================================
+2. wildfire_detector/function_class_demo_TensorRT.py
+================================================================================
+WHAT CHANGED:
+  - Rewrote load_or_build_trt_engine() method to:
+    * Read trt_precision from config ("fp16" or "int8")
+    * If "int8": look for trt_engine_int8 file, raise FileNotFoundError if missing
+    * If "fp16" (default): same auto-build behavior as before
+
+WHY:
+  The function_class now supports both precisions. INT8 cannot auto-build
+  (requires calibration), so it expects a pre-built engine file.
+
+
+================================================================================
+3. wildfire_detector/function_class_TensorRT.py
+================================================================================
+WHAT CHANGED:
+  - Same changes as function_class_demo_TensorRT.py (operational version).
+
+WHY:
+  Both the demo (lab testing) and operational (real deployment) pipelines
+  must support INT8.
+
+
+================================================================================
+4. TensorRT_Conversion.py
+================================================================================
+WHAT CHANGED:
+  - Updated docstring to clarify this script only exports ONNX.
+  - Removed --build_engine flag and related code (was added then removed).
+  - Final state: clean ONNX-only export, same as original but with updated docs.
+
+WHY:
+  FP16 engine is auto-built by ScanManager on first Orin launch.
+  INT8 engine uses a separate dedicated script (build_int8_engine.py).
+  No need for TensorRT_Conversion.py to handle engine building.
+
+
+================================================================================
+5. build_int8_engine.py (NEW FILE)
+================================================================================
+WHAT IT DOES:
+  - Builds a TensorRT INT8 engine from ONNX using calibration images.
+  - Uses TensorRT Python API with IInt8EntropyCalibrator2.
+  - Loads images from --calib_dir, resizes to 224x224, normalizes (ImageNet stats).
+  - Feeds batches through calibrator to compute quantization scales.
+  - Saves engine (.trt) + calibration cache (.cache) for reuse.
+
+USAGE:
+  python build_int8_engine.py \
+    --onnx wildfire_detector/best_model.onnx \
+    --calib_dir Seperated_Dataset/D_Fire/Fire/images \
+    --output wildfire_detector/best_model_int8.trt
+
+MUST RUN ON THE ORIN (TensorRT engines are hardware-specific).
+
+
+================================================================================
+6. phase2_verification/benchmark_inference.py
+================================================================================
+WHAT CHANGED:
+  - Added "int8" to --backend choices (was: pytorch, tensorrt; now: pytorch, tensorrt, int8)
+  - Added config patching logic: creates a temporary config file with the desired
+    trt_precision set, passes it to ScanManager(config_path=...).
+  - Does NOT modify the real config.yaml (avoids destroying comments/formatting).
+  - The temp config approach is safe against crashes (real file untouched).
+  - Added tqdm progress bar for the inference loop.
+  - Removed redundant extra warmup (ScanManager.__init__ already warms up).
+  - Removed --warmup arg (no longer needed).
+  - Passes verbose=False to ScanManager to suppress all per-image output.
+
+WHY:
+  Allows benchmarking all three backends (FP32/FP16/INT8) without manually
+  editing config.yaml between runs. Clean progress output for large datasets.
+
+
+================================================================================
+7. phase2_verification/generate_figures.py (NEW FILE)
+================================================================================
+WHAT IT DOES:
+  Reads benchmark_results/ CSVs and generates thesis figures:
+  - Fig 9:  Confusion matrices per model
+  - Fig 10: Inference time bar chart per model
+  - Fig 11: F1-score vs latency scatter (accuracy-latency trade-off)
+  - Fig 12: FP32 vs FP16 vs INT8 precision comparison
+  - Pipeline stage breakdown (stacked bar)
+  - Combined results table export (CSV for thesis tables)
+
+USAGE:
+  python generate_figures.py --results_dir benchmark_results --output_dir figures
+
+
+================================================================================
+8. Verbose Flag (function_class_demo.py + function_class_demo_TensorRT.py + utils_phase2_flow.py)
+================================================================================
+WHAT CHANGED:
+  - Added verbose parameter to ScanManager.__init__(config_path=None, verbose=True)
+  - self.verbose is set at construction time (before warmup runs)
+  - All per-image prints guarded by: if getattr(self, 'verbose', True)
+  - plot= argument in predict_crops_majority_vote() tied to self.verbose
+  - Added verbose parameter to predict_crops_majority_vote() and
+    predict_crops_majority_vote_RT() in utils_phase2_flow.py
+  - Timing breakdown prints inside utils functions guarded by: if verbose
+
+BEHAVIOR:
+  verbose=True (default):
+    - Prints "Inference Timing for Preprocess and Cropping"
+    - Prints "Inference Timing Breakdown" (per stage)
+    - Prints "Final Prediction" + "Confidence" + "BBox"
+    - Shows matplotlib crop visualization plot
+  
+  verbose=False:
+    - All above suppressed (silent)
+    - Used by benchmark_inference.py for clean tqdm-only output
+
+USAGE:
+  sm = ScanManager()                    # verbose=True (demo/testing)
+  sm = ScanManager(verbose=False)       # silent (benchmarking)
+
+
+================================================================================
+WORKFLOW SUMMARY
+================================================================================
+
+Section 5.1 (Model Support):
+  - All 6 models supported via config.yaml model_name + architecture rebuild
+  - Covered by: training_framework/train.py + TensorRT_Conversion.py
+
+Section 5.2 (Single-Image Evaluation):
+  - training_framework/test.py evaluates on held-out test set
+  - Outputs: accuracy, precision, recall, F1, FPR, FNR, confusion matrix, ROC
+
+Section 5.3 (Inference Latency):
+  - benchmark_inference.py --backend pytorch → inference_and_vote_ms column
+  - Repeat for each model (swap best_model.pt + config model_name)
+
+Section 5.4 (Model Selection):
+  - No code needed. Derived from 5.2 + 5.3 data manually.
+
+Section 5.5 (FP32 vs FP16 vs INT8):
+  - benchmark_inference.py --backend pytorch/tensorrt/int8
+  - generate_figures.py produces comparison charts
+
+Section 5.6 (Pipeline Breakdown):
+  - Timing instrumentation in _phase2_inner (metadata_and_region, crop_and_resize,
+    batch_and_normalize, inference_and_vote, total)
+  - generate_figures.py produces stacked bar chart
+
+
+================================================================================
+GIT COMMIT MESSAGE
+================================================================================
+
+feat: Add INT8 TensorRT support, benchmark visualization, and verbose flag
+
+- Add trt_precision config field to select FP16/INT8 engine at runtime
+- Update load_or_build_trt_engine() in both TRT function_class files to
+  branch on precision: auto-build for FP16, require pre-built for INT8
+- Create build_int8_engine.py: INT8 calibration + engine build script
+  using TensorRT Python API with IInt8EntropyCalibrator2
+- Add --backend int8 to benchmark_inference.py with safe temp-config
+  approach (does not modify real config.yaml)
+- Create generate_figures.py: reads benchmark CSVs, produces thesis
+  figures (confusion matrices, latency bars, F1-vs-latency scatter,
+  precision comparison, pipeline breakdown)
+- Clean up TensorRT_Conversion.py: ONNX-export only, remove engine build
+- Fix: benchmark no longer overwrites config.yaml (uses temp file)
+- Add tqdm progress bar to benchmark_inference.py
+- Remove redundant extra warmup loop (ScanManager init already warms up)
+- Add verbose flag to both demo ScanManagers (controls prints + plots)
+  * verbose=True (default): prints timing, predictions, shows matplotlib plots
+  * verbose=False: silent mode for benchmarking (no prints, no plots)
+- Fix plot=True being hardcoded — now tied to verbose flag
+- Add model_name options comment to config.yaml
+- Add verbose parameter to predict_crops_majority_vote() and
+  predict_crops_majority_vote_RT() in utils_phase2_flow.py
+
+Covers thesis Chapter 5 sections 5.1–5.6.
+
+
+================================================================================
+================================================================================
+UPDATE: 7-Stage Timing, Crop Factors Override, Bug Fixes, Visualization Tools
+================================================================================
+================================================================================
+Date: June 14–15, 2026
+Scope: Complete Chapter 5 (sections 5.1–5.8) implementation finalization
+
+================================================================================
+9. CRITICAL BUG FIX: predict_crops_majority_vote return type
+================================================================================
+WHAT WAS WRONG:
+  predict_crops_majority_vote() returns final_class as INTEGER (0 or 1).
+  benchmark_inference.py compared: result["final_prediction"] == "Fire"
+  This ALWAYS evaluated to False → ALL 6216 predictions classified as NoFire.
+
+FIX:
+  Changed comparison to: result["final_prediction"] in ("Fire", 1)
+  Now works regardless of whether the return is string or int.
+
+IMPACT:
+  Without this fix, all benchmark accuracy results were meaningless (100% FN).
+
+
+================================================================================
+10. 7-Stage Timing Instrumentation (all function_class files)
+================================================================================
+WHAT CHANGED:
+  Previously: 4 stages (metadata_and_region, crop_and_resize, batch_and_normalize,
+              inference_and_vote)
+  Now: 7 stages matching thesis Table 13:
+    1. input_and_metadata      — bbox parsing, coordinate extraction
+    2. region_validation       — inside/outside/partial check + clip
+    3. crop_extraction         — multi-scale crop_bbox_scaled calls
+    4. resize_and_preprocess   — bilinear resize to 224×224
+    5. batch_construction      — stack + normalize (ImageNet stats)
+    6. model_inference         — forward pass (with CUDA sync)
+    7. majority_vote           — softmax, argmax, vote aggregation
+
+FILES CHANGED:
+  - wildfire_detector/function_class_demo.py (_phase2_inner)
+  - wildfire_detector/function_class_demo_TensorRT.py (_phase2_inner)
+  - wildfire_detector/function_class.py (_phase2_inner)
+  - wildfire_detector/function_class_TensorRT.py (_phase2_inner)
+
+  All four now store timings dict with the 7 keys above + "total".
+  self.last_phase2_timings = timings (accessible after each phase2 call).
+
+
+================================================================================
+11. predict_crops_majority_vote() → 3-tuple return
+================================================================================
+WHAT CHANGED:
+  Old return: (final_class, avg_conf)  — 2 values
+  New return: (final_class, avg_conf, times)  — 3 values
+
+  times dict contains: {'prepare_batch': ..., 'inference': ..., 'postprocess': ...}
+  Callers unpack: final_label, avg_conf, infer_timings = predict_crops_majority_vote(...)
+  timings['model_inference'] = infer_timings['inference']
+  timings['majority_vote'] = infer_timings['postprocess']
+
+FILES CHANGED:
+  - wildfire_detector/utils_phase2_flow.py (both predict functions)
+  - All four function_class files (3-tuple unpack)
+
+
+================================================================================
+12. benchmark_inference.py — 7-stage columns + --crop_factors
+================================================================================
+WHAT CHANGED:
+  - Output CSV now has 7 timing columns per image (mean/std/min/max each in summary)
+  - Added --crop_factors CLI argument:
+      --crop_factors "1.4142"           → single crop (for section 5.7)
+      --crop_factors "1.2247,2.0"       → two crops
+      (omit for default 3 crops)
+  - Output folder name includes crop suffix when custom factors used:
+      benchmark_results/resnet18_tensorrt_crops_1.4142/
+  - summary.csv includes num_crops and crop_factors fields
+
+USAGE:
+  python benchmark_inference.py --dataset ..\Seperated_Dataset\D_Fire --backend tensorrt --crop_factors "1.4142"
+
+
+================================================================================
+13. generate_figures.py — Updated for 7 stages
+================================================================================
+WHAT CHANGED:
+  - Pipeline breakdown now shows 7 colored bars (was 4)
+  - Stage labels match thesis Table 13
+  - Colors: 7 distinct colors from ColorBrewer
+  - Combined table export includes all 7×4 timing columns (mean/std/min/max)
+
+
+================================================================================
+14. plot_crops_with_predictions() — Edge-shift-aware bbox overlay
+================================================================================
+WHAT CHANGED:
+  Old behavior: Assumed bbox is always centered in each crop.
+  New behavior: Replicates crop_bbox_scaled() shift logic to compute actual
+                bbox position inside the crop when near image edges.
+
+  Also added:
+  - Scale factor labels in crop titles (×1.22, ×1.41, ×2.00)
+  - Dashed red bbox inside each crop (correctly positioned)
+  - save_path parameter (default: results_demoPackage/crops_phase2.png)
+  - min_cropsize parameter (matches crop_bbox_scaled logic)
+  - Colored spine borders REMOVED (user preference)
+
+FILE: wildfire_detector/utils_phase2_flow.py
+
+
+================================================================================
+15. visualize_predictions.py (NEW FILE)
+================================================================================
+WHAT IT DOES:
+  Generates crop visualization plots for error analysis (thesis section 5.8).
+  Reads predictions.csv from a benchmark run, filters errors (FP/FN),
+  loads original images + YOLO labels, runs the crop+classify pipeline,
+  and saves annotated plots with per-crop predictions.
+
+MODES:
+  --errors    : All misclassified images (FP + FN)
+  --fp_only   : False positives only
+  --fn_only   : False negatives only
+  --images    : Specific images by filename (comma-separated)
+
+USAGE:
+  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire \
+    --predictions benchmark_results\resnet18_tensorrt\predictions.csv --errors
+
+OUTPUT:
+  visualizations/false_positives/FP_<name>.png
+  visualizations/false_negatives/FN_<name>.png
+  visualizations/selected/OK_<name>.png
+
+
+================================================================================
+16. compare_bbox_overlay.py (NEW FILE)
+================================================================================
+WHAT IT DOES:
+  Visualizes YOLO bounding boxes overlaid on D_Fire images.
+  Supports side-by-side comparison of D_Fire (merged single-class) vs
+  D_Fire_Org (original multi-class: 0=fire, 1=smoke).
+
+USAGE:
+  python compare_bbox_overlay.py --image WEB07375.jpg --save
+  python compare_bbox_overlay.py --image WEB07375.jpg --org_labels ..\Seperated_Dataset\D_Fire_Org\Fire\labels --save
+
+OUTPUT:
+  visualizations/bbox_overlay_<name>.png
+
+
+================================================================================
+17. README_Results.txt (NEW FILE)
+================================================================================
+  Step-by-step execution guide for all Chapter 5 sections.
+  Lists: section → description → file → command → output → status.
+  Includes full execution order for running on the Jetson Orin Nano.
+
+
+================================================================================
+IMPLEMENTATION STATUS (as of June 15, 2026)
+================================================================================
+
+[✓] All code for sections 5.1–5.8 is implemented
+[✓] 7-stage timing in all 4 function_class files
+[✓] 3-tuple return from predict functions
+[✓] --crop_factors CLI for section 5.7
+[✓] Edge-aware bbox overlay in crop plots
+[✓] visualize_predictions.py for section 5.8
+[✓] compare_bbox_overlay.py utility
+[✓] generate_figures.py updated for 7 stages
+[✓] Critical prediction bug fixed
+
+[ ] Run all 6 models × PyTorch on Jetson (sections 5.2-5.4)
+[ ] Convert ResNet18 to TRT FP16 + INT8 on Jetson (section 5.5)
+[ ] Run TRT benchmarks on Jetson (sections 5.5-5.6)
+[ ] Run single-crop benchmark (section 5.7)
+[ ] Generate error visualizations (section 5.8)
+
+
+================================================================================
+FILES CHANGED
+================================================================================
+
+MODIFIED:
+  wildfire_detector/config.yaml
+  wildfire_detector/function_class_demo.py
+  wildfire_detector/function_class_demo_TensorRT.py
+  wildfire_detector/function_class_TensorRT.py
+  wildfire_detector/utils_phase2_flow.py
+  TensorRT_Conversion.py
+  phase2_verification/benchmark_inference.py
+
+NEW:
+  build_int8_engine.py
+  phase2_verification/generate_figures.py
+  phase2_verification/benchmark_inference_explanation.txt
+  phase2_verification/smoke_test.py
+  phase2_verification/changelog_int8_support.txt
