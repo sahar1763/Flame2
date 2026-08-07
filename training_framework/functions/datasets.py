@@ -111,8 +111,17 @@ def prepare_dataloaders(image_size, images_dir, labels_csv_path, batch_size, con
     df['fire'] = df['fire'].fillna(0).astype(int)
     df['label'] = df.apply(lambda row: 1 if row['fire'] == 1 else 0, axis=1)
 
+    # ---------- Handle ignored datasets (excluded entirely: no train/val/test) ----------
+    test_only_sources = config.get("dataset", {}).get("test_only", []) or []
+    ignored_sources = config.get("dataset", {}).get("ignored_datasets", []) or []
+    # test_only takes precedence: if a dataset is listed in both, keep it as test-only
+    ignored_sources = [d for d in ignored_sources if d not in test_only_sources]
+    if ignored_sources:
+        df = df[~df['dataset'].isin(ignored_sources)]
+        if rank == 0:
+            print(f"[Datasets] Ignoring datasets entirely (no train/val/test): {ignored_sources}")
+
     # ---------- Handle test-only datasets ----------
-    test_only_sources = config.get("dataset", {}).get("test_only", [])
     test_df = df[df['dataset'].isin(test_only_sources)]
     remaining_df = df[~df['dataset'].isin(test_only_sources)]
 

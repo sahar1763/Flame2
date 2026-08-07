@@ -4,7 +4,11 @@ dataset:
   image_size: 224
   val_ratio: 0.2
   test_only:
-    - FireMan
+    - D_Fire
+  # Datasets to exclude entirely (no training, no validation, no test).
+  # If a dataset appears in both test_only and ignored_datasets, it is treated as test_only.
+  ignored_datasets:
+    - IAI_Datasets
 
 dataloader:
   pin_memory: true

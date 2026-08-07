@@ -1,4 +1,5 @@
 import os
+import math
 import shutil
 import pandas as pd
 import csv
@@ -330,11 +331,99 @@ def process_dataset(source_root, dest_root):
     print(f"Success! Copied {files_copied} images.")
 
 
-def _process_single_image(args):
-    """Internal helper function for parallel processing."""
-    old_path, new_path, target_size = args
+def _read_merged_yolo_bbox(label_path):
+    """Read a YOLO-format label file and return the merged (union) bounding box
+    covering all boxes, as normalized (x_min, y_min, x_max, y_max) in [0, 1].
+
+    Returns None if the file is missing, unreadable, empty, or degenerate.
+    YOLO line format: <class> <x_center> <y_center> <width> <height> (normalized).
+    """
+    if not os.path.exists(label_path):
+        return None
+
+    x_mins, y_mins, x_maxs, y_maxs = [], [], [], []
     try:
-        if target_size is not None:
+        with open(label_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                xc, yc, w, h = map(float, parts[1:5])
+                x_mins.append(xc - w / 2.0)
+                y_mins.append(yc - h / 2.0)
+                x_maxs.append(xc + w / 2.0)
+                y_maxs.append(yc + h / 2.0)
+    except Exception:
+        return None
+
+    if not x_mins:
+        return None
+
+    x_min = min(max(0.0, min(x_mins)), 1.0)
+    y_min = min(max(0.0, min(y_mins)), 1.0)
+    x_max = min(max(0.0, max(x_maxs)), 1.0)
+    y_max = min(max(0.0, max(y_maxs)), 1.0)
+
+    if x_max <= x_min or y_max <= y_min:
+        return None
+
+    return (x_min, y_min, x_max, y_max)
+
+
+def _process_single_image(args):
+    """Internal helper function for parallel processing.
+
+    args = (old_path, new_path, target_size, crop_spec)
+    crop_spec is None for the standard full-image path, or a tuple
+    (x_min_n, y_min_n, x_max_n, y_max_n, area_ratio, min_size) describing a
+    bbox-centered crop in normalized coordinates.
+    """
+    old_path, new_path, target_size, crop_spec = args
+    try:
+        if crop_spec is not None:
+            with Image.open(old_path) as img:
+                img = img.convert("RGB")
+                W, H = img.size
+                (x_min_n, y_min_n, x_max_n, y_max_n,
+                 area_ratio, min_size) = crop_spec
+
+                # Normalized bbox -> pixel bbox on the ORIGINAL image
+                x_min = x_min_n * W
+                y_min = y_min_n * H
+                x_max = x_max_n * W
+                y_max = y_max_n * H
+
+                bbox_w = max(1.0, x_max - x_min)
+                bbox_h = max(1.0, y_max - y_min)
+                max_dim = max(bbox_w, bbox_h)
+
+                # Crop side so the bbox occupies ~area_ratio of the crop area,
+                # with a minimum size, and never larger than the image.
+                crop_side = max(float(min_size), max_dim / math.sqrt(area_ratio))
+                crop_side = min(crop_side, float(W), float(H))
+
+                cx = 0.5 * (x_min + x_max)
+                cy = 0.5 * (y_min + y_max)
+
+                # Center the window on the bbox, then shift it fully inside
+                left = cx - crop_side / 2.0
+                top = cy - crop_side / 2.0
+                left = min(max(0.0, left), W - crop_side)
+                top = min(max(0.0, top), H - crop_side)
+
+                box = (
+                    int(round(left)),
+                    int(round(top)),
+                    int(round(left + crop_side)),
+                    int(round(top + crop_side)),
+                )
+                cropped = img.crop(box)
+
+                if target_size is not None:
+                    cropped = cropped.resize(target_size, Image.Resampling.LANCZOS)
+                cropped.save(new_path, "JPEG", quality=90)
+
+        elif target_size is not None:
             with Image.open(old_path) as img:
                 # High-quality Lanczos resize
                 resized_img = img.resize(target_size, Image.Resampling.LANCZOS)
@@ -348,92 +437,338 @@ def _process_single_image(args):
         return f"Error on {old_path}: {e}"
 
 
+# def create_unified_dataset(
+#         input_root_dir,
+#         output_root_dir,
+#         sample_ratio_csv=None,
+#         image_size=None
+# ):
+#     os.makedirs(output_root_dir, exist_ok=True)
+#
+#     # 1. Handle image_size input flexibility
+#     if isinstance(image_size, int):
+#         target_size = (image_size, image_size)
+#     elif isinstance(image_size, (tuple, list)) and len(image_size) == 2 and isinstance(image_size[0], int):
+#         target_size = tuple(image_size)
+#     else:
+#         target_size = None  # Covers None, (None, None), etc.
+#
+#     # 2. Load sample ratios if provided
+#     sample_ratios = {}
+#     if sample_ratio_csv is not None and os.path.exists(sample_ratio_csv):
+#         df_ratio = pd.read_csv(sample_ratio_csv)
+#         for _, row in df_ratio.iterrows():
+#             dataset = row["dataset"]
+#             fire = int(row["fire"])
+#             sample_every = int(row["sample_every"])
+#             sample_ratios[(dataset, fire)] = sample_every
+#
+#     tasks = []
+#     new_rows = []
+#     next_index = 1
+#
+#     # 3. Walk through folders and plan the tasks
+#     print("Scanning directories and planning tasks...")
+#     for dataset_name in os.listdir(input_root_dir):
+#         dataset_path = os.path.join(input_root_dir, dataset_name)
+#         if not os.path.isdir(dataset_path):
+#             continue
+#
+#         for fire_folder_name, fire_value in [("Fire", 1), ("NoFire", 0)]:
+#             folder_path = os.path.join(dataset_path, fire_folder_name)
+#             if not os.path.exists(folder_path):
+#                 continue
+#
+#             sample_every = sample_ratios.get((dataset_name, fire_value), 1)
+#             images = sorted(os.listdir(folder_path))
+#
+#             for idx, image_name in enumerate(images):
+#                 if idx % sample_every != 0:
+#                     continue
+#
+#                 old_image_path = os.path.join(folder_path, image_name)
+#                 if not os.path.exists(old_image_path):
+#                     continue
+#
+#                 new_image_name = f"img_{next_index:06d}.jpg"
+#                 new_image_path = os.path.join(output_root_dir, new_image_name)
+#
+#                 # Queue the task for parallel execution
+#                 tasks.append((old_image_path, new_image_path, target_size))
+#
+#                 new_rows.append({
+#                     "id": new_image_name,
+#                     "dataset": dataset_name,
+#                     "fire": fire_value
+#                 })
+#                 next_index += 1
+#
+#     # 4. Execute processing in parallel using all CPU cores
+#     print(f"Starting processing of {len(tasks)} images...")
+#     with ProcessPoolExecutor() as executor:
+#         # Wrapped in tqdm for a nice progress bar
+#         results = list(tqdm(executor.map(_process_single_image, tasks), total=len(tasks)))
+#
+#     # 5. Save unified CSV
+#     csv_path = os.path.join(output_root_dir, "labels.csv")
+#     pd.DataFrame(new_rows).to_csv(csv_path, index=False)
+#
+#     # Error Reporting
+#     errors = [res for res in results if res is not True]
+#     if errors:
+#         print(f"Finished with {len(errors)} errors. Check console for details.")
+#
+#     print(f"Success! Unified dataset with {len(new_rows)} images created at {output_root_dir}")
+
+
 def create_unified_dataset(
         input_root_dir,
         output_root_dir,
         sample_ratio_csv=None,
-        image_size=None
+        image_size=None,
+        crop_to_bbox=False,
+        crop_area_ratio=0.25,
+        min_crop_size=224
 ):
     os.makedirs(output_root_dir, exist_ok=True)
 
     # 1. Handle image_size input flexibility
     if isinstance(image_size, int):
         target_size = (image_size, image_size)
-    elif isinstance(image_size, (tuple, list)) and len(image_size) == 2 and isinstance(image_size[0], int):
+
+    elif (
+        isinstance(image_size, (tuple, list))
+        and len(image_size) == 2
+        and isinstance(image_size[0], int)
+    ):
         target_size = tuple(image_size)
+
     else:
-        target_size = None  # Covers None, (None, None), etc.
+        target_size = None
 
     # 2. Load sample ratios if provided
     sample_ratios = {}
-    if sample_ratio_csv is not None and os.path.exists(sample_ratio_csv):
+
+    if (
+        sample_ratio_csv is not None
+        and os.path.exists(sample_ratio_csv)
+    ):
         df_ratio = pd.read_csv(sample_ratio_csv)
+
         for _, row in df_ratio.iterrows():
             dataset = row["dataset"]
             fire = int(row["fire"])
             sample_every = int(row["sample_every"])
+
             sample_ratios[(dataset, fire)] = sample_every
 
     tasks = []
     new_rows = []
     next_index = 1
 
+    valid_image_extensions = (
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".bmp",
+        ".tif",
+        ".tiff",
+    )
+
     # 3. Walk through folders and plan the tasks
     print("Scanning directories and planning tasks...")
+
     for dataset_name in os.listdir(input_root_dir):
-        dataset_path = os.path.join(input_root_dir, dataset_name)
+        dataset_path = os.path.join(
+            input_root_dir,
+            dataset_name,
+        )
+
         if not os.path.isdir(dataset_path):
             continue
 
-        for fire_folder_name, fire_value in [("Fire", 1), ("NoFire", 0)]:
-            folder_path = os.path.join(dataset_path, fire_folder_name)
+        for fire_folder_name, fire_value in [
+            ("Fire", 1),
+            ("NoFire", 0),
+        ]:
+            folder_path = os.path.join(
+                dataset_path,
+                fire_folder_name,
+            )
+
             if not os.path.exists(folder_path):
                 continue
 
-            sample_every = sample_ratios.get((dataset_name, fire_value), 1)
-            images = sorted(os.listdir(folder_path))
+            # ---------------------------------------------------------
+            # Support both folder structures
+            # ---------------------------------------------------------
+            #
+            # Regular classification structure:
+            # DatasetName/Fire/image.jpg
+            #
+            # Bounding-box structure:
+            # DatasetName/Fire/images/image.jpg
+            # DatasetName/Fire/labels/image.txt
+            #
+            images_subfolder = os.path.join(
+                folder_path,
+                "images",
+            )
+
+            if os.path.isdir(images_subfolder):
+                images_folder = images_subfolder
+                # YOLO labels live alongside images/ in a sibling labels/ folder
+                labels_folder = os.path.join(folder_path, "labels")
+                if not os.path.isdir(labels_folder):
+                    labels_folder = None
+            else:
+                images_folder = folder_path
+                labels_folder = None
+
+            sample_every = sample_ratios.get(
+                (dataset_name, fire_value),
+                1,
+            )
+
+            # Read image files only.
+            images = sorted([
+                image_name
+                for image_name in os.listdir(images_folder)
+                if (
+                    os.path.isfile(
+                        os.path.join(
+                            images_folder,
+                            image_name,
+                        )
+                    )
+                    and image_name.lower().endswith(
+                        valid_image_extensions
+                    )
+                )
+            ])
+
+            print(
+                f"{dataset_name} / {fire_folder_name}: "
+                f"found {len(images)} images, "
+                f"sampling every {sample_every}"
+            )
 
             for idx, image_name in enumerate(images):
                 if idx % sample_every != 0:
                     continue
 
-                old_image_path = os.path.join(folder_path, image_name)
+                old_image_path = os.path.join(
+                    images_folder,
+                    image_name,
+                )
+
                 if not os.path.exists(old_image_path):
                     continue
 
-                new_image_name = f"img_{next_index:06d}.jpg"
-                new_image_path = os.path.join(output_root_dir, new_image_name)
+                new_image_name = (
+                    f"img_{next_index:06d}.jpg"
+                )
+
+                new_image_path = os.path.join(
+                    output_root_dir,
+                    new_image_name,
+                )
+
+                # Determine per-image crop window (bbox-centered) when enabled.
+                # Falls back to None (full-image resize) for NoFire images,
+                # datasets without labels, or missing/empty label files.
+                crop_spec = None
+                if (
+                    crop_to_bbox
+                    and fire_value == 1
+                    and labels_folder is not None
+                ):
+                    label_path = os.path.join(
+                        labels_folder,
+                        os.path.splitext(image_name)[0] + ".txt",
+                    )
+                    merged_box = _read_merged_yolo_bbox(label_path)
+                    if merged_box is not None:
+                        crop_spec = (
+                            merged_box[0],
+                            merged_box[1],
+                            merged_box[2],
+                            merged_box[3],
+                            crop_area_ratio,
+                            min_crop_size,
+                        )
 
                 # Queue the task for parallel execution
-                tasks.append((old_image_path, new_image_path, target_size))
+                tasks.append(
+                    (
+                        old_image_path,
+                        new_image_path,
+                        target_size,
+                        crop_spec,
+                    )
+                )
 
                 new_rows.append({
                     "id": new_image_name,
                     "dataset": dataset_name,
-                    "fire": fire_value
+                    "fire": fire_value,
                 })
+
                 next_index += 1
 
     # 4. Execute processing in parallel using all CPU cores
-    print(f"Starting processing of {len(tasks)} images...")
+    print(
+        f"Starting processing of {len(tasks)} images..."
+    )
+
     with ProcessPoolExecutor() as executor:
-        # Wrapped in tqdm for a nice progress bar
-        results = list(tqdm(executor.map(_process_single_image, tasks), total=len(tasks)))
+        results = list(
+            tqdm(
+                executor.map(
+                    _process_single_image,
+                    tasks,
+                ),
+                total=len(tasks),
+            )
+        )
 
     # 5. Save unified CSV
-    csv_path = os.path.join(output_root_dir, "labels.csv")
-    pd.DataFrame(new_rows).to_csv(csv_path, index=False)
+    csv_path = os.path.join(
+        output_root_dir,
+        "labels.csv",
+    )
 
-    # Error Reporting
-    errors = [res for res in results if res is not True]
+    pd.DataFrame(new_rows).to_csv(
+        csv_path,
+        index=False,
+    )
+
+    # Error reporting
+    errors = [
+        result
+        for result in results
+        if result is not True
+    ]
+
     if errors:
-        print(f"Finished with {len(errors)} errors. Check console for details.")
+        print(
+            f"Finished with {len(errors)} errors. "
+            f"Check console for details."
+        )
 
-    print(f"Success! Unified dataset with {len(new_rows)} images created at {output_root_dir}")
+        for error in errors:
+            print(error)
+
+    print(
+        f"Success! Unified dataset with "
+        f"{len(new_rows)} images created at "
+        f"{output_root_dir}"
+    )
 
 # -------------------
 # Example usage
 # -------------------
+
 if __name__ == "__main__":
 
     # # =====================================================
@@ -485,4 +820,21 @@ if __name__ == "__main__":
     sample_ratio_csv = "SampleRatio.csv"
     image_size = (224,224)
 
-    create_unified_dataset(input_root_dir, output_root_dir, sample_ratio_csv, image_size)
+    # --- Bbox-centered cropping (flag + size kept side by side) ---
+    # crop_to_bbox:    if True, Fire images that have a YOLO label are cropped
+    #                  around the MERGED bbox so the fire occupies ~crop_area_ratio
+    #                  of the crop AREA, then resized to image_size. NoFire images
+    #                  and images without labels fall back to full-image resize.
+    # crop_area_ratio: target fraction of the crop AREA occupied by the bbox
+    #                  (e.g. 0.25 -> crop side = bbox_max_dim / sqrt(0.25) = 2x bbox).
+    crop_to_bbox = True
+    crop_area_ratio = 0.25
+
+    create_unified_dataset(
+        input_root_dir,
+        output_root_dir,
+        sample_ratio_csv,
+        image_size,
+        crop_to_bbox=crop_to_bbox,
+        crop_area_ratio=crop_area_ratio,
+    )
