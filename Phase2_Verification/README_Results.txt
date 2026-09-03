@@ -17,6 +17,101 @@ PREREQUISITES
 
 
 ================================================================================
+CURRENT WORKFLOW - AUTOMATED ORCHESTRATORS (use these)
+================================================================================
+The whole Chapter 5 matrix is now driven by two orchestrator scripts. They
+locate each model's weights under Trained_Models/ automatically, build the
+TensorRT engines they need, run all combinations, and aggregate the CSVs. You
+do NOT need to hand-swap weights or edit config.yaml per model anymore.
+
+Run BOTH from the Phase2_Verification/ folder ON THE ORIN.
+
+--------------------------------------------------------------------------------
+A) run_classifier_benchmarks.py  -> Sections 5.2-5.5 (single-image classifier)
+--------------------------------------------------------------------------------
+Matrix: 6 models x 3 precisions (fp32/fp16/int8) = 18 runs.
+
+  # FULL command used for the report:
+  python run_classifier_benchmarks.py \
+      --images_dir ../Resized_TestSet_Cropped_Biggest \
+      --labels_csv ../Resized_TestSet_Cropped_Biggest/labels.csv \
+      --test_datasets FireSmokeDataset FireSmokeNEWdataset \
+      --calib_dir ../Resized_TestSet_Cropped_Biggest \
+      --num_calib 1000 --rebuild_engines \
+      --trained_models ../Trained_Models/experiments_2nd \
+      --output_dir classifier_results
+
+Combinations (all optional except the dataset target):
+  --models      subset of {alexnet vgg16 resnet18 resnet34 resnet50 mobilenet_v2}  (default: all 6)
+  --precisions  subset of {fp32 fp16 int8}                                         (default: all 3)
+  dataset       EITHER --images_dir + --labels_csv (+ --test_datasets)  OR  --dataset <Fire/+NoFire folder>
+  --calib_dir   REQUIRED when int8 is requested and the engine must be built (both classes, recursively globbed)
+  --num_calib   INT8 calibration images (default 500; report used 1000)
+  --rebuild_engines   force rebuild .trt   |   --skip_engine_build  assume they exist
+  --dry_run     print commands without executing
+
+Output: classifier_results/<model>_<backend>/summary.csv + combined_classifier_summary.csv
+
+--------------------------------------------------------------------------------
+B) run_crop_benchmarks.py  -> Sections 5.6-5.7 (full RGB crop pipeline)
+--------------------------------------------------------------------------------
+Matrix: 6 models x 3 backends x 3 datasets x 3 crop strategies = 162 runs.
+
+  # FULL command used for the report:
+  python run_crop_benchmarks.py \
+      --dataset_root ../Sampled_Seperated_Dataset \
+      --trained_models ../Trained_Models/experiments_2nd \
+      --backends pytorch tensorrt int8 \
+      --strategies raw crops1 crops3 \
+      --fire_labels_subdir labels_biggest \
+      --calib_dir ../Sampled_Seperated_Dataset \
+      --num_calib 1000 \
+      --output_dir crop_results \
+      --trtexec /usr/src/tensorrt/bin/trtexec
+
+Combinations (all optional except --dataset_root):
+  --models      subset of the 6 architectures                         (default: all 6)
+  --backends    subset of {pytorch(FP32) tensorrt(FP16) int8(INT8)}   (default: pytorch)
+  --strategies  subset of {raw crops1 crops3}                         (default: all 3)
+                  raw    = whole frame, no crop
+                  crops1 = single sqrt(2) crop around the bbox
+                  crops3 = three-scale crop + majority vote
+  --datasets    subset of sub-folders under --dataset_root            (default: all)
+  --fire_labels_subdir  Fire bbox label folder                        (default: labels_biggest)
+  --calib_dir   REQUIRED when int8 is in --backends (both classes, recursively globbed)
+  --num_calib   INT8 calibration images (default 500; report used 1000)
+  --no_restore  leave last-staged model in the package  |  --dry_run  print only
+
+Output: crop_results/<dataset>/<model>_<backend>_<strategy>/summary.csv + combined_crop_summary.csv
+
+--------------------------------------------------------------------------------
+C) Figures + tables (run on the PC from the CSVs produced above)
+--------------------------------------------------------------------------------
+  # classifier sections 5.2-5.5:
+  python generate_figures.py --results_dir classifier_results \
+      --output_dir figures_classifier --weights_dir ../Trained_Models/experiments_2nd
+
+  # crop sections 5.6-5.7:
+  python generate_figures.py --results_dir crop_results \
+      --output_dir figures_crop --weights_dir ../Trained_Models/experiments_2nd
+
+  # precision-agreement proof (FP32 vs FP16 vs INT8, per image):
+  python analyze_agreement.py --results_dir classifier_results
+
+  # qualitative errors (section 5.8):
+  python visualize_predictions.py --dataset ../Sampled_Seperated_Dataset/FireSmokeDataset \
+      --predictions crop_results/FireSmokeDataset/resnet18_tensorrt_crops3/predictions.csv --errors
+
+--weights_dir lets generate_figures.py read REAL params + weights_mb + onnx/fp16/int8
+engine sizes straight from the model files (nothing hardcoded).
+
+
+================================================================================
+LEGACY SINGLE-MODEL WORKFLOW (below) - superseded by the orchestrators above
+================================================================================
+
+
+================================================================================
 Section 5.1 — Candidate Model Evaluation Setup
 ================================================================================
 Description:
@@ -284,6 +379,93 @@ wildfire_detector/utils_phase2_flow.py  — Core functions (crop, predict, plot)
 
 
 ================================================================================
+POST-PROCESSING TOOLS (PC-only, NO Orin re-run)
+================================================================================
+These operate purely on the predictions.csv files already produced by the Orin
+benchmarks. They never call the model on the Orin again; every number is a
+re-count of stored per-image predictions. All of them key on the PAIR
+(image, true_label) because the IAI Fire/ and NoFire/ folders use INDEPENDENT
+numbering, so the same filename (e.g. img_000001.jpg) exists in both folders and
+must be disambiguated by its label.
+
+--------------------------------------------------------------------------------
+build_consensus_mistakes.py  — images that EVERY run got wrong
+--------------------------------------------------------------------------------
+Intersects the errors of many runs and lists only the (image, true_label) pairs
+that were misclassified by ALL of them. Use it to find the "unresolvable" cases
+independent of model/backend/strategy.
+
+  --results_dir  results tree to scan (default crop_results/IAI_Datasets)
+  --strategy     all | crops1 | crops3 | raw
+                   all  -> intersect across ALL strategies+backends+archs
+                           (IAI = 6 arch x 3 backend x 3 strategy = 54 runs)
+                   cropsN/raw -> restrict to one strategy (18 runs each)
+  --backend      all | pytorch | tensorrt | int8
+
+  Output: <results_dir>/IAI_consensus_mistakes_<strategy>.csv
+          columns: image, folder, true_label, error_type (FP/FN)
+
+  Example (the 303-image "no model detected it" list used for filtering):
+    python build_consensus_mistakes.py --strategy all
+
+--------------------------------------------------------------------------------
+recompute_filtered_metrics.py  — metrics with a set of images removed
+--------------------------------------------------------------------------------
+Recomputes precision/recall/F1/FPR/accuracy for every run BEFORE and AFTER
+dropping an exclusion list, and reports the deltas. Read-only; writes one
+comparison table.
+
+  --results_dir  results tree to scan (default crop_results/IAI_Datasets)
+  --exclude      CSV with columns image,true_label to drop
+                   (default IAI_consensus_mistakes_all.csv)
+  --strategy     all | crops1 | crops3 | raw
+  --backend      all | pytorch | tensorrt | int8
+  --out          optional output path
+
+  Output: <results_dir>/IAI_metrics_filtered_<strategy>.csv
+          before/after columns for recall, f1, precision, fpr, accuracy + counts
+
+  Example:
+    python recompute_filtered_metrics.py --strategy all
+
+--------------------------------------------------------------------------------
+materialize_filtered_iai.py  — write a full filtered results tree
+--------------------------------------------------------------------------------
+Creates a PARALLEL results directory with the excluded images physically removed
+from each predictions.csv and each summary.csv recomputed (metric columns
+updated, ALL timing columns copied unchanged). Originals are never modified.
+The output tree has the exact same layout/schema as the input, so every
+downstream tool (generate_figures.py, build_consensus_mistakes.py,
+recompute_filtered_metrics.py) can point at it directly.
+
+  --src      source results tree (default crop_results/IAI_Datasets)
+  --dst      output tree         (default crop_results/IAI_Datasets_filtered)
+  --exclude  CSV with columns image,true_label to drop
+               (default IAI_consensus_mistakes_all.csv)
+
+  Output: <dst>/<model>_<backend>_<strategy>/{predictions.csv, summary.csv}
+          <dst>/combined_crop_summary.csv
+
+  Example (build the filtered IAI used from now on):
+    python materialize_filtered_iai.py
+    python generate_figures.py --results_dir crop_results\IAI_Datasets_filtered --output_dir figures_iai_filtered --weights_dir ..\Trained_Models\experiments_2nd
+
+--------------------------------------------------------------------------------
+visualize_predictions.py  — NEW options (see file docstring for full list)
+--------------------------------------------------------------------------------
+  --fire_labels_subdir  Fire bbox label subfolder (default labels_biggest).
+                        MUST match run_crop_benchmarks.py, else fire crops fall
+                        back to a virtual center box (NOT benchmark-accurate).
+  --weights             Load the EXACT benchmarked checkpoint so overlay scores
+                        match the predictions.csv (otherwise the packaged
+                        wildfire_detector/best_model.pt is used).
+  Image lookup now uses true_label (Fire/NoFire share filenames). The "Final"
+  title is taken from the CSV verdict so it can never contradict the FP/FN
+  folder. Pair a 3-crop plot with a *_crops3 CSV (and a 1-crop plot with a
+  *_crops1 CSV) so the panels and the verdict use the same strategy.
+
+
+================================================================================
 IMPLEMENTATION STATUS
 ================================================================================
 
@@ -299,5 +481,6 @@ IMPLEMENTATION STATUS
 [✓] Section 5.8 — Error visualization (visualize_predictions.py)
 [✓] Figure generation (generate_figures.py)
 [✓] Bbox overlay utility (compare_bbox_overlay.py)
+[✓] Post-processing: consensus mistakes / filtered metrics / filtered tree
 
 ALL CODE IS IMPLEMENTED. Remaining work is execution on the Jetson Orin Nano.

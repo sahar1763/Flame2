@@ -1,10 +1,11 @@
 dataset:
-  images_dir: "../UnifiedDataset"
-  labels_csv: "../UnifiedDataset/labels.csv"
+  images_dir: "../UnifiedDataset_Cropped_Biggest"
+  labels_csv: "../UnifiedDataset_Cropped_Biggest/labels.csv"
   image_size: 224
   val_ratio: 0.2
   test_only:
-    - D_Fire
+    - FireSmokeDataset
+    - FireSmokeNEWdataset
   # Datasets to exclude entirely (no training, no validation, no test).
   # If a dataset appears in both test_only and ignored_datasets, it is treated as test_only.
   ignored_datasets:

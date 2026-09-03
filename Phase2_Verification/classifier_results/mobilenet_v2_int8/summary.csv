@@ -1,0 +1,2 @@
+model,backend,precision,num_crops,dataset,num_images,accuracy,fire_precision,fire_recall,fire_f1,fpr,fnr,TP,FP,FN,TN,mean_model_inference_ms,std_model_inference_ms,min_model_inference_ms,p95_model_inference_ms,max_model_inference_ms
+mobilenet_v2,int8,INT8,1,/home/malat/PycharmProjects/Flame2/Resized_TestSet_Cropped_Biggest,8207,95.86,98.31,96.29,97.28,5.58,3.71,6091,105,235,1776,3.71,1.237,2.085,6.987,10.183

@@ -215,7 +215,7 @@ def predict_crops_majority_vote(crops, model, bbox, device,
 
     # Protection if there are no crops
     if (isinstance(crops, list) and len(crops) == 0) or (torch.is_tensor(crops) and crops.nelement() == 0):
-        return "No Fire", 0.0
+        return 0, 0.0, times
 
     # Prepare Batch and Move to Device
     t1 = time.perf_counter()
@@ -317,7 +317,7 @@ def predict_crops_majority_vote_RT(crops, model, bbox,
 
     # Protection if there are no crops
     if (isinstance(crops, list) and len(crops) == 0) or (torch.is_tensor(crops) and crops.nelement() == 0):
-        return "No Fire", 0.0
+        return 0, 0.0, times
 
     # Stage 1: Handle Batch
     t1 = time.perf_counter()

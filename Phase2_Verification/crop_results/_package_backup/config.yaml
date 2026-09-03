@@ -1,0 +1,122 @@
+# ---------------------------------------------------
+# Image Sizes
+# ---------------------------------------------------
+
+image:
+  ir_size: [720, 1280]          # IR image resolution [height, width]
+  rgb_size: [1080, 1920]        # RGB image resolution [height, width]
+
+# ---------------------------------------------------
+# Sensors
+# ---------------------------------------------------
+
+sensors:
+  ir_camera:
+    measurement_error: 2.0      # Minimum detectable temperature difference [sensor units]. Used as threshold floor
+
+# ---------------------------------------------------
+# Camera Field of View (FOV)
+# ---------------------------------------------------
+
+fov:
+  min_deg: 2.2                  # Minimum allowed FOV [degrees]
+  max_deg: 60.0                 # Maximum allowed FOV [degrees]
+
+# ---------------------------------------------------
+# Grid Sampling
+# ---------------------------------------------------
+
+grid:
+  points_per_frame: 4           # Number of points to sample in the uniform grid - for H calc
+
+# ---------------------------------------------------
+# Fire Parameters
+# ---------------------------------------------------
+
+fire:
+  max_size_m: 3              # Max estimated fire length [meters]
+  ratio_in_rgb_image: 0.25     # Required fire size ratio within the RGB image
+
+# ---------------------------------------------------
+# Preprocessing
+# ---------------------------------------------------
+
+preprocessing:
+  apply: false                  # Apply preprocessing to input images (convert to uint8, etc.)
+
+# ---------------------------------------------------
+# Postprocessing Parameters
+# ---------------------------------------------------
+
+postprocessing:
+  threshold: null               # Optional hard threshold on diff map (overrides diff_threshold)
+  temp_threshold: null          # Optional temperature-based threshold for refinement
+
+# ---------------------------------------------------
+# Clustering (Morphological Closing + Connected Components)
+# ---------------------------------------------------
+
+clustering:
+  closing_alpha: 0.5             # Kernel size = closing_alpha * fire_length_pixel. Controls gap-bridging between nearby active pixels
+  min_cluster_pixels_ratio: 0.25          # Ratio for calc Minimum area [m^2] of active fire pixels to keep a cluster (smaller groups are discarded as noise) - will be multiplied by max_size_m^2 to get the actual pixel count threshold
+  absolute_temp_threshold: 100    # Minimum temperature value for a pixel to be considered as a decoy.
+  diff_z_score: 3.5              # Z-score threshold for diff-map activation: threshold = mean + z_score * std
+  min_contrast: 2              # Z score (in std terms) for Minimum contrast for selecting cluster centers - sigma
+
+# ---------------------------------------------------
+# Phase 1 Parameters
+# ---------------------------------------------------
+
+phase1:
+  suppress_bbox_margin_m: 3    # Margin in meters to expand phase0 bboxes for diff-map suppression
+
+# ---------------------------------------------------
+# Cluster Scoring
+# ---------------------------------------------------
+
+scoring:
+  norm_size: 9                 # Fire area threshold [m^2] ,  equal to max_size_m^2
+  norm_intensity: 200           # Normalized average cluster intensity
+  scaling_weights: [0.7, 0.3, 10, 0.4]   # (wI, wA, k, t) scaling parameters for sigmoid calculation
+
+# ---------------------------------------------------
+# Phase 2 Parameters
+# ---------------------------------------------------
+
+phase2:
+  trt_precision: "fp16"               # TensorRT precision: "fp16" or "int8"
+  trt_engine_fp16: "best_model_fp16.trt"   # FP16 engine filename (inside package)
+  trt_engine_int8: "best_model_int8.trt"   # INT8 engine filename (inside package)
+  net_image_size: 224                 # Input size expected by the classification network (in pixels) # TODO: Change
+  crop_factors: [1.2247, 1.4142, 2.0] # Factors used to crop around detected fire regions at multiple scales
+  model_name: "resnet18"              # Options: resnet18, resnet34, resnet50, alexnet, vgg16, mobilenet_v2
+
+# ---------------------------------------------------
+# Detector Client parameters
+# ---------------------------------------------------  
+  
+detector:
+  geo_server_base: "http://127.0.0.1:9000"
+  endpoint_pixel2geo: "/api/pixel_to_geo"
+  endpoint_geo2pixel: "/api/geo_to_pixel"
+  # GeoReg server id
+  server_id: 1
+  # HTTP timeout (seconds)
+  timeout_s: 5.0
+
+# ---------------------------------------------------
+# Warmup
+# ---------------------------------------------------
+
+warmup:
+  num_iterations: 10
+
+# ---------------------------------------------------
+# Logging
+# ---------------------------------------------------
+
+logging:
+  log_file: "wildfire_detector.log"   # Log file path (relative or absolute)
+  level: "INFO"                       # Logging level: DEBUG, INFO, WARNING, ERROR
+  max_bytes: 10485760                 # Max log file size in bytes before rotation (10 MB)
+  backup_count: 5                     # Number of rotated log files to keep

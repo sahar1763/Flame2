@@ -9,11 +9,34 @@ Modes:
   --fp_only   : Only false positives
   --fn_only   : Only false negatives
 
+Options:
+  --show_raw_score : also classify the whole (raw) frame and print its score on
+                     the original-image panel, next to the 3-crop majority vote
+                     (useful for illustrating raw vs multi-crop behavior; off by
+                     default because the raw score is not always relevant for the
+                     crop anomaly figures).
+  --fire_labels_subdir : Fire bbox label subfolder (default: labels_biggest).
+                     MUST match what the benchmark used (run_crop_benchmarks.py
+                     defaults to labels_biggest). If it does not match / is
+                     missing, fire crops fall back to a virtual center box and
+                     will NOT correspond to the crop the model was scored on.
+  --weights : Path to the EXACT benchmarked checkpoint (best_model.pt) whose
+                     predictions.csv you are visualizing. If omitted, the packaged
+                     wildfire_detector/best_model.pt is used, which may be a
+                     DIFFERENT model than the CSV -> overlay scores will not match
+                     the CSV verdicts.
+
+Notes:
+  - Image lookup uses true_label, because Fire/ and NoFire/ use INDEPENDENT
+    numbering (the same filename can exist in both folders).
+  - On a PC without TensorRT, only --backend pytorch works; overlay scores are
+    then FP32 and will differ slightly from an int8/tensorrt predictions.csv.
+
 Usage:
-  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\resnet18_pytorch\predictions.csv --errors
-  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\resnet18_pytorch\predictions.csv --images "WEB07375.jpg,WEB08123.jpg"
-  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\resnet18_pytorch\predictions.csv --fn_only
-  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\resnet18_pytorch\predictions.csv --fp_only
+  python visualize_predictions.py --dataset ..\Sampled_Seperated_Dataset\IAI_Datasets --predictions crop_results\IAI_Datasets\mobilenet_v2_pytorch_crops1\predictions.csv --fn_only --output_dir visualizations\IAI_mobilenet_fn
+  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\D_Fire\resnet18_pytorch\predictions.csv --errors --output_dir visualizations\D_Fire
+  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\D_Fire\resnet18_pytorch\predictions.csv --images "WEB07375.jpg,WEB08123.jpg"
+  python visualize_predictions.py --dataset ..\Seperated_Dataset\D_Fire --predictions benchmark_results\D_Fire\resnet18_pytorch\predictions.csv --fp_only --output_dir visualizations\D_Fire
 """
 
 import os
@@ -25,7 +48,7 @@ import cv2
 import pandas as pd
 import torch
 
-sys.path.append(os.path.abspath(".."))
+sys.path.insert(0, os.path.abspath(".."))
 
 from wildfire_detector.utils_phase2_flow import plot_crops_with_predictions
 
@@ -127,6 +150,22 @@ def main():
                         help="Comma-separated list of image filenames to visualize")
     parser.add_argument("--max_images", type=int, default=50,
                         help="Maximum number of images to visualize (default: 50)")
+    parser.add_argument("--show_raw_score", action="store_true",
+                        help="Also classify the whole (raw) frame and show its "
+                             "score on the original-image panel, next to the "
+                             "multi-crop decision (for raw vs crops comparison).")
+    parser.add_argument("--weights", type=str, default=None,
+                        help="Path to the EXACT benchmarked checkpoint (best_model.pt) "
+                             "whose predictions.csv you are visualizing. If omitted, "
+                             "the packaged wildfire_detector/best_model.pt is used, "
+                             "which may be a DIFFERENT model than the CSV -> overlay "
+                             "scores will not match the CSV verdicts. Architecture must "
+                             "match config phase2.model_name.")
+    parser.add_argument("--fire_labels_subdir", type=str, default="labels_biggest",
+                        help="Fire bbox label subfolder (default: labels_biggest, "
+                             "same as run_crop_benchmarks.py). MUST match what the "
+                             "benchmark used, otherwise the crop drawn here will not "
+                             "match the crop the model was actually scored on.")
     args = parser.parse_args()
 
     # Load predictions
@@ -169,6 +208,16 @@ def main():
     print(f"Initializing ScanManager ({args.backend})...")
     sm = ScanManager(verbose=True)
 
+    # Override the packaged weights with the EXACT benchmarked checkpoint so the
+    # overlay scores correspond to the predictions.csv being visualized. Without
+    # this, sm.model is the packaged best_model.pt (a different checkpoint).
+    if args.weights:
+        ckpt = torch.load(args.weights, map_location=sm.device, weights_only=False)
+        state = ckpt["model_state"] if isinstance(ckpt, dict) and "model_state" in ckpt else ckpt
+        sm.model.load_state_dict(state)
+        sm.model.eval()
+        print(f"Overlay model weights overridden with: {args.weights}")
+
     rgb_size = sm.config["image"]["rgb_size"]
     canvas_h, canvas_w = rgb_size[0], rgb_size[1]
     crop_factors = sm.config["phase2"]["crop_factors"]
@@ -176,8 +225,14 @@ def main():
 
     # Build dataset lookup
     fire_images_dir = os.path.join(args.dataset, "Fire", "images")
-    fire_labels_dir = os.path.join(args.dataset, "Fire", "labels")
-    nofire_images_dir = os.path.join(args.dataset, "NoFire", "images")
+    fire_labels_dir = os.path.join(args.dataset, "Fire", args.fire_labels_subdir)
+    nofire_images_dir = os.path.join(args.dataset, "NoFire")
+    if not os.path.isdir(fire_labels_dir):
+        print(f"WARNING: fire labels dir not found: {fire_labels_dir} "
+              f"(use --fire_labels_subdir). Fire crops would fall back to a "
+              f"virtual center box and NOT match the benchmark.")
+    else:
+        print(f"Fire labels dir: {fire_labels_dir}")
 
     # Create output dirs
     os.makedirs(args.output_dir, exist_ok=True)
@@ -195,10 +250,14 @@ def main():
         true_label = int(row["true_label"])
         pred_label = int(row["pred_label"])
 
-        # Find image path
-        img_path = os.path.join(fire_images_dir, img_name)
-        label_path = os.path.join(fire_labels_dir, os.path.splitext(img_name)[0] + ".txt")
-        if not os.path.exists(img_path):
+        # Find image path.
+        # NOTE: Fire/ and NoFire/ use INDEPENDENT numbering, so the same
+        # filename (e.g. img_000001.jpg) can exist in BOTH folders. Resolve
+        # the correct file using true_label instead of a folder-priority guess.
+        if true_label == 1:
+            img_path = os.path.join(fire_images_dir, img_name)
+            label_path = os.path.join(fire_labels_dir, os.path.splitext(img_name)[0] + ".txt")
+        else:
             img_path = os.path.join(nofire_images_dir, img_name)
             label_path = None
 
@@ -221,6 +280,11 @@ def main():
                 bbox = yolo_to_canvas_bbox(xc, yc, w, h, H_orig, W_orig, scale, y_off, x_off)
 
         if bbox is None:
+            if true_label == 1:
+                # A fire image with NO usable bbox: the benchmark would have used
+                # the real label, so a virtual box here is misleading. Warn.
+                print(f"  WARN: {img_name} is Fire but no bbox found at "
+                      f"{label_path} -> using virtual center box (NOT benchmark-accurate)")
             bbox = compute_virtual_bbox(canvas_h, canvas_w, max_crop_factor)
 
         # Run phase2 with plot enabled
@@ -295,9 +359,39 @@ def main():
         r_min, c_min, r_max, c_max = bbox_pixels
         plot_bbox = (c_min, r_min, c_max, r_max)
 
+        # AUTHORITATIVE verdict = the benchmark CSV row (pred_label/confidence).
+        # The per-crop panels above are recomputed here for illustration and may
+        # differ (different crop strategy / precision / weights), but the "Final"
+        # title MUST match the CSV so it never contradicts the FP/FN folder and
+        # the reported statistics.
+        csv_pred_str = label_names[pred_label]
+        csv_conf = float(row["confidence"]) if "confidence" in row else avg_conf
+
+        # Optional: raw whole-frame score (same path as benchmark_inference.classify_raw_frame).
+        # Folded into the title args so the package plot function is left untouched:
+        # title renders as  "Final: <label> (<conf>)\nRaw frame: <label> (<conf>)".
+        title_pred = csv_pred_str
+        title_conf = csv_conf
+        if args.show_raw_score:
+            raw_t = torch.from_numpy(frame).permute(2, 0, 1).float()
+            raw_t = torch.nn.functional.interpolate(
+                raw_t.unsqueeze(0), size=(image_size, image_size),
+                mode='bilinear', align_corners=False)
+            raw_batch = raw_t  # already [1, 3, H, W]
+            raw_batch.div_(255.0)
+            raw_batch = (raw_batch - mean) / std
+            with torch.no_grad():
+                raw_out = sm.model(raw_batch.to(sm.device))
+                raw_probs = torch.softmax(raw_out, dim=1)
+                raw_idx = int(raw_probs.argmax(dim=1).item())
+            raw_pred_str = label_names[raw_idx]
+            raw_conf_val = float(raw_probs.max(dim=1).values.item())
+            title_pred = f"{csv_pred_str} ({csv_conf:.2f})\nRaw frame: {raw_pred_str}"
+            title_conf = raw_conf_val
+
         plot_crops_with_predictions(
             frame, cropped_images_np, pred_labels_str, confidence_scores,
-            final_label_str, avg_conf,
+            title_pred, title_conf,
             bbox=plot_bbox, crop_factors=crop_factors, save_path=save_path
         )
 

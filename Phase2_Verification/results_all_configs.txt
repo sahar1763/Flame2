@@ -1,0 +1,64 @@
+RGB VERIFICATION - ALL CONFIGURATIONS DECISION MATRIX
+------------------------------------------------------------------------------------------------------------------------
+SmokeFire (unified) = FireSmoke + FireSmokeNEW pooled confusion matrix, n=8120 (grading benchmark)
+IAI (filtered)      = realized-scenario illustration, n=2289 (303 undetectable fires removed; NOT a benchmark)
+Acc/Prec/Rec/F1/FPR in %; Lat = mean end-to-end ms/frame. Sorted by smokefire_f1.
+------------------------------------------------------------------------------------------------------------------------
+                                    |           SmokeFire unified           |             IAI filtered             
+model         backend   crops    n# | SF_acc SF_prec SF_rec  SF_f1 SF_fpr | IAI_acc IAI_prc IAI_rec IAI_f1 IAI_fpr
+------------------------------------------------------------------------------------------------------------------------
+resnet50      int8      c1        1 |   98.7   99.4   98.9   99.1    2.1 |   83.9   96.7   77.9   86.3    4.9  | SF   9.8ms  IAI  10.6ms
+resnet50      pytorch   c1        1 |   98.6   99.4   98.8   99.1    2.1 |   83.6   96.0   78.1   86.1    6.1  | SF  31.3ms  IAI  42.1ms
+resnet50      tensorrt  c1        1 |   98.6   99.4   98.8   99.1    2.1 |   83.7   96.0   78.2   86.2    6.1  | SF  14.2ms  IAI  13.1ms
+resnet18      int8      c1        1 |   98.5   98.9   99.2   99.0    3.8 |   83.5   97.4   76.6   85.8    3.8  | SF   7.1ms  IAI   7.4ms
+resnet18      tensorrt  c1        1 |   98.4   98.8   99.1   99.0    3.8 |   84.1   97.2   77.9   86.4    4.3  | SF   8.8ms  IAI   9.4ms
+resnet18      pytorch   c1        1 |   98.4   98.8   99.1   99.0    3.8 |   84.1   97.2   77.9   86.4    4.3  | SF  21.7ms  IAI  25.0ms
+resnet50      int8      c3        3 |   98.4   99.0   98.9   98.9    3.4 |   81.3   92.4   77.7   84.4   11.9  | SF  19.1ms  IAI  17.6ms
+resnet50      tensorrt  c3        3 |   98.3   99.0   98.8   98.9    3.3 |   80.9   91.4   78.1   84.2   13.8  | SF  27.9ms  IAI  25.5ms
+resnet50      pytorch   c3        3 |   98.3   99.0   98.8   98.9    3.3 |   81.0   91.4   78.1   84.2   13.8  | SF  55.8ms  IAI  64.4ms
+vgg16         int8      c1        1 |   98.3   98.9   98.9   98.9    3.6 |   89.2   97.1   86.0   91.2    4.8  | SF  16.3ms  IAI  16.3ms
+vgg16         pytorch   c1        1 |   98.2   98.9   98.8   98.8    3.8 |   90.0   97.1   87.2   91.9    4.9  | SF  50.1ms  IAI  57.9ms
+vgg16         tensorrt  c1        1 |   98.2   98.8   98.8   98.8    3.8 |   90.0   97.1   87.2   91.9    4.9  | SF  26.6ms  IAI  31.1ms
+resnet18      int8      c3        3 |   98.0   98.2   99.2   98.7    6.0 |   81.9   94.6   76.6   84.6    8.1  | SF  12.1ms  IAI  12.8ms
+resnet18      pytorch   c3        3 |   98.0   98.2   99.1   98.7    5.9 |   82.7   94.8   77.7   85.4    8.0  | SF  36.2ms  IAI  48.7ms
+resnet18      tensorrt  c3        3 |   98.0   98.2   99.1   98.7    6.0 |   82.7   94.8   77.7   85.4    7.9  | SF  16.0ms  IAI  16.1ms
+mobilenet_v2  pytorch   c1        1 |   97.9   98.6   98.7   98.6    4.7 |   82.1   94.9   76.6   84.8    7.6  | SF  27.4ms  IAI  26.6ms
+vgg16         tensorrt  c3        3 |   97.9   98.4   98.9   98.6    5.5 |   89.0   95.4   87.3   91.2    7.9  | SF  41.4ms  IAI  47.6ms
+vgg16         pytorch   c3        3 |   97.9   98.4   98.9   98.6    5.5 |   88.9   95.4   87.2   91.1    7.9  | SF  98.9ms  IAI 103.1ms
+mobilenet_v2  tensorrt  c1        1 |   97.9   98.6   98.7   98.6    4.7 |   82.1   94.9   76.6   84.8    7.6  | SF   8.5ms  IAI   8.9ms
+vgg16         int8      c3        3 |   97.9   98.3   98.9   98.6    5.7 |   88.0   95.2   85.9   90.3    8.0  | SF  31.1ms  IAI  31.0ms
+mobilenet_v2  int8      c1        1 |   97.8   98.4   98.7   98.6    5.3 |   80.0   95.5   72.8   82.6    6.4  | SF   8.1ms  IAI   8.5ms
+mobilenet_v2  tensorrt  c3        3 |   97.8   98.4   98.7   98.5    5.3 |   78.9   89.7   76.2   82.4   16.3  | SF  15.5ms  IAI  15.6ms
+mobilenet_v2  pytorch   c3        3 |   97.7   98.4   98.7   98.5    5.3 |   78.9   89.8   76.2   82.5   16.1  | SF  34.8ms  IAI  40.5ms
+mobilenet_v2  int8      c3        3 |   97.6   98.1   98.7   98.4    6.2 |   76.7   89.9   72.3   80.2   15.1  | SF  13.4ms  IAI  13.9ms
+alexnet       pytorch   c1        1 |   97.5   97.6   99.2   98.4    8.0 |   86.3   96.5   81.9   88.6    5.5  | SF  23.1ms  IAI  19.6ms
+alexnet       tensorrt  c1        1 |   97.5   97.6   99.2   98.4    8.0 |   86.3   96.5   81.9   88.6    5.5  | SF   9.6ms  IAI  10.1ms
+alexnet       int8      c1        1 |   97.5   97.5   99.2   98.4    8.5 |   86.1   96.2   81.9   88.5    6.0  | SF   7.8ms  IAI   8.0ms
+resnet34      tensorrt  c1        1 |   97.0   97.4   98.8   98.1    8.8 |   86.2   94.3   83.8   88.8    9.4  | SF  11.2ms  IAI  11.4ms
+resnet34      pytorch   c1        1 |   97.0   97.4   98.8   98.1    8.8 |   86.2   94.3   83.9   88.8    9.4  | SF  31.6ms  IAI  40.4ms
+resnet34      int8      c1        1 |   96.9   97.4   98.6   98.0    8.7 |   85.5   94.5   82.6   88.1    8.9  | SF   8.8ms  IAI   9.4ms
+alexnet       tensorrt  c3        3 |   96.9   96.8   99.3   98.0   11.0 |   86.2   96.3   82.0   88.6    5.9  | SF  13.2ms  IAI  13.8ms
+alexnet       pytorch   c3        3 |   96.9   96.8   99.3   98.0   11.0 |   86.2   96.3   82.0   88.6    5.9  | SF  30.0ms  IAI  26.9ms
+alexnet       int8      c3        3 |   96.8   96.6   99.3   98.0   11.5 |   86.1   96.2   81.8   88.4    6.0  | SF  11.2ms  IAI  11.4ms
+resnet34      tensorrt  c3        3 |   96.5   96.8   98.7   97.8   10.7 |   84.2   90.9   84.1   87.4   15.6  | SF  25.0ms  IAI  20.2ms
+resnet34      pytorch   c3        3 |   96.5   96.8   98.7   97.8   10.7 |   84.2   90.9   84.2   87.4   15.6  | SF  41.9ms  IAI  56.2ms
+resnet34      int8      c3        3 |   96.4   96.8   98.6   97.7   10.8 |   83.1   90.8   82.4   86.4   15.6  | SF  15.0ms  IAI  15.0ms
+alexnet       int8      raw       1 |   83.1   95.8   81.6   88.1   12.0 |   47.2   91.5   20.9   34.0    3.6  | SF   8.8ms  IAI   9.3ms
+alexnet       tensorrt  raw       1 |   83.1   96.0   81.4   88.1   11.4 |   47.7   92.5   21.4   34.8    3.3  | SF  11.5ms  IAI  11.4ms
+alexnet       pytorch   raw       1 |   83.1   96.0   81.4   88.1   11.4 |   47.7   92.5   21.4   34.8    3.3  | SF  24.8ms  IAI  25.5ms
+mobilenet_v2  int8      raw       1 |   82.3   97.5   79.0   87.3    6.8 |   45.2   80.8   20.7   32.9    9.1  | SF   9.5ms  IAI  10.1ms
+resnet34      pytorch   raw       1 |   78.3   97.6   73.6   83.9    6.0 |   55.5   90.4   35.4   50.8    7.0  | SF  35.1ms  IAI  41.9ms
+resnet34      tensorrt  raw       1 |   78.3   97.6   73.5   83.9    6.0 |   55.4   90.2   35.4   50.8    7.1  | SF  14.5ms  IAI  13.0ms
+mobilenet_v2  pytorch   raw       1 |   78.3   97.9   73.2   83.8    5.1 |   45.7   82.4   21.0   33.5    8.4  | SF  28.8ms  IAI  28.0ms
+mobilenet_v2  tensorrt  raw       1 |   78.2   98.0   73.1   83.7    5.0 |   45.7   82.5   20.9   33.4    8.3  | SF  10.1ms  IAI  10.3ms
+resnet34      int8      raw       1 |   77.9   97.5   73.2   83.6    6.3 |   54.5   90.7   33.5   48.9    6.4  | SF  10.6ms  IAI  11.0ms
+resnet18      int8      raw       1 |   77.2   98.0   71.8   82.9    4.9 |   41.2   87.0   11.3   20.0    3.1  | SF   8.5ms  IAI   8.8ms
+resnet18      pytorch   raw       1 |   76.6   98.1   70.9   82.3    4.6 |   41.8   86.5   12.5   21.8    3.6  | SF  27.8ms  IAI  27.1ms
+resnet18      tensorrt  raw       1 |   76.5   98.1   70.8   82.3    4.6 |   41.8   86.5   12.5   21.8    3.6  | SF  11.6ms  IAI  10.9ms
+resnet50      int8      raw       1 |   74.3   99.3   67.0   80.0    1.5 |   45.8   95.3   17.7   29.8    1.6  | SF  12.1ms  IAI  12.0ms
+resnet50      pytorch   raw       1 |   73.1   99.2   65.5   78.9    1.8 |   46.4   94.9   18.7   31.2    1.9  | SF  33.6ms  IAI  44.5ms
+resnet50      tensorrt  raw       1 |   73.0   99.2   65.4   78.9    1.8 |   46.4   94.9   18.6   31.1    1.9  | SF  18.4ms  IAI  14.7ms
+vgg16         tensorrt  raw       1 |   68.3   98.0   60.0   74.4    4.1 |   52.8   92.3   29.9   45.2    4.6  | SF  30.6ms  IAI  32.1ms
+vgg16         pytorch   raw       1 |   68.3   98.0   60.0   74.4    4.1 |   52.8   92.3   29.9   45.2    4.6  | SF  48.8ms  IAI  62.1ms
+vgg16         int8      raw       1 |   67.5   98.1   58.9   73.6    3.8 |   50.0   91.4   25.6   40.0    4.5  | SF  19.8ms  IAI  17.5ms
+------------------------------------------------------------------------------------------------------------------------

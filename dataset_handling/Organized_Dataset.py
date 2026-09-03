@@ -618,7 +618,7 @@ def create_unified_dataset(
             if os.path.isdir(images_subfolder):
                 images_folder = images_subfolder
                 # YOLO labels live alongside images/ in a sibling labels/ folder
-                labels_folder = os.path.join(folder_path, "labels")
+                labels_folder = os.path.join(folder_path, "labels_biggest")
                 if not os.path.isdir(labels_folder):
                     labels_folder = None
             else:
@@ -708,10 +708,19 @@ def create_unified_dataset(
                     )
                 )
 
+                # Keep traceability between the renamed UnifiedDataset image
+                # and the exact original source image.
+                original_relative_path = os.path.relpath(
+                    old_image_path,
+                    input_root_dir,
+                ).replace(os.sep, "/")
+
                 new_rows.append({
                     "id": new_image_name,
                     "dataset": dataset_name,
                     "fire": fire_value,
+                    "original_id": image_name,
+                    "original_relative_path": original_relative_path,
                 })
 
                 next_index += 1

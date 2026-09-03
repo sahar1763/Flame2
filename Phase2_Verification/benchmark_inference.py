@@ -26,9 +26,9 @@ Covers thesis sections:
   - 5.6: Pipeline stage breakdown (metadata_and_region, crop_and_resize, batch_and_normalize, inference_and_vote)
 
 Usage:
-  python benchmark_inference.py --dataset ../Seperated_Dataset/D_Fire --backend pytorch
-  python benchmark_inference.py --dataset ../Seperated_Dataset/D_Fire --backend tensorrt
-  python benchmark_inference.py --dataset ../Seperated_Dataset/D_Fire --backend int8
+  	python Phase2_Verification/benchmark_inference.py --dataset Phase2_Verification/Benchmark_Test_Subset --backend pytorch --output_dir Phase2_Verification/benchmark_results/mobilenet_v2
+	python Phase2_Verification/benchmark_inference.py --dataset Phase2_Verification/Benchmark_Test_Subset --backend tensorrt --output_dir Phase2_Verification/benchmark_results/mobilenet_v2
+	python Phase2_Verification/benchmark_inference.py --dataset Phase2_Verification/Benchmark_Test_Subset --backend int8 --output_dir Phase2_Verification/benchmark_results/mobilenet_v2
 """
 
 import os
@@ -46,6 +46,13 @@ import cv2
 from tqdm import tqdm
 
 sys.path.append(os.path.abspath(".."))
+
+# Pipeline inference helpers (reused for the raw whole-image mode so raw uses the
+# exact same model + normalization + inference/vote code as the crop pipeline).
+from wildfire_detector.utils_phase2_flow import (
+    predict_crops_majority_vote,
+    predict_crops_majority_vote_RT,
+)
 
 
 # ===========================================================================
@@ -71,13 +78,13 @@ def parse_yolo_label(label_path):
 # Dataset loading
 # ===========================================================================
 
-def load_dataset(dataset_dir):
-    """Load D_Fire dataset: Fire/images + Fire/labels + NoFire/images."""
+def load_dataset(dataset_dir, fire_labels_subdir="labels"):
+    """Load dataset: Fire/images + Fire/<fire_labels_subdir> + NoFire/images."""
     samples = []
 
     fire_images_dir = os.path.join(dataset_dir, "Fire", "images")
-    fire_labels_dir = os.path.join(dataset_dir, "Fire", "labels")
-    nofire_images_dir = os.path.join(dataset_dir, "NoFire", "images")
+    fire_labels_dir = os.path.join(dataset_dir, "Fire", fire_labels_subdir)
+    nofire_images_dir = os.path.join(dataset_dir, "NoFire")
 
     if os.path.isdir(fire_images_dir):
         for fname in sorted(os.listdir(fire_images_dir)):
@@ -170,6 +177,58 @@ def build_metadata(sm, bbox):
     return md
 
 
+def classify_raw_frame(sm, frame_rgb, backend, image_size):
+    """
+    Classify the WHOLE frame (no bbox crop) by resizing the entire image to
+    (image_size x image_size) and running it through the same model + normalization
+    + inference/vote code used by the crop pipeline. This is the 'raw' crop mode:
+    the full non-square frame is used directly (aspect ratio squished to 224x224),
+    NOT a square crop taken over the image.
+
+    Returns: (final_class:int, avg_conf:float, timings:dict[str,float] in seconds)
+    """
+    timings = {
+        'input_and_metadata': 0.0,
+        'region_validation': 0.0,
+        'crop_extraction': 0.0,
+    }
+    t0 = time.perf_counter()
+
+    # --- Resize whole frame (same interpolation as pipeline Stage 4) ---
+    t_resize = time.perf_counter()
+    t = torch.from_numpy(frame_rgb).permute(2, 0, 1).float()
+    t = torch.nn.functional.interpolate(
+        t.unsqueeze(0),
+        size=(image_size, image_size),
+        mode='bilinear',
+        align_corners=False,
+    ).squeeze(0)
+    timings['resize_and_preprocess'] = time.perf_counter() - t_resize
+
+    # --- Batch construction + normalization (same as pipeline Stage 5) ---
+    t_batch = time.perf_counter()
+    batch = t.unsqueeze(0)  # [1, 3, image_size, image_size]
+    batch.div_(255.0)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    batch = (batch - mean) / std
+    timings['batch_construction'] = time.perf_counter() - t_batch
+
+    dummy_bbox = (0, 0, frame_rgb.shape[0], frame_rgb.shape[1])
+    if backend == 'pytorch':
+        final_class, avg_conf, infer_t = predict_crops_majority_vote(
+            crops=batch.to(sm.device), model=sm.model, bbox=dummy_bbox,
+            device=sm.device, verbose=False)
+    else:
+        final_class, avg_conf, infer_t = predict_crops_majority_vote_RT(
+            crops=batch, model=sm.model, bbox=dummy_bbox, verbose=False)
+
+    timings['model_inference'] = infer_t.get('inference', 0.0)
+    timings['majority_vote'] = infer_t.get('postprocess', 0.0)
+    timings['total'] = time.perf_counter() - t0
+    return final_class, avg_conf, timings
+
+
 # ===========================================================================
 # Main
 # ===========================================================================
@@ -185,6 +244,13 @@ def main():
                         help="Output folder for results (default: benchmark_results)")
     parser.add_argument("--crop_factors", type=str, default=None,
                         help="Override crop factors (comma-separated, e.g. '1.4142' or '1.2247,1.4142,2.0')")
+    parser.add_argument("--crop_mode", type=str, default="crops",
+                        choices=["crops", "raw"],
+                        help="crops = multi-scale square crops around the bbox (uses --crop_factors); "
+                             "raw = classify the whole frame resized to net input (no cropping)")
+    parser.add_argument("--fire_labels_subdir", type=str, default="labels",
+                        help="Name of the Fire labels subfolder to use (default: 'labels'). "
+                             "e.g. 'labels_biggest' to benchmark the biggest-fire bboxes.")
     args = parser.parse_args()
 
     # --- Create ScanManager (loads model from wildfire_detector/ package + warmup) ---
@@ -203,9 +269,39 @@ def main():
     _temp_config_path = None
     if args.backend in ("int8", "tensorrt"):
         import yaml as _yaml
-        import importlib.resources as _pkg
         import tempfile
-        _config_path = str(_pkg.files("wildfire_detector") / "config.yaml")
+
+        # Locate a source config.yaml robustly. Prefer the installed package's
+        # copy; fall back to the repo-local wildfire_detector/config.yaml sitting
+        # one level up from this script. This avoids "config.yaml not found in
+        # the venv" when the package resources are not laid out as expected.
+        _config_path = None
+        _candidates = []
+        try:
+            import importlib.resources as _pkg
+            _candidates.append(str(_pkg.files("wildfire_detector") / "config.yaml"))
+        except Exception:
+            pass
+        try:
+            import wildfire_detector as _wd
+            _candidates.append(os.path.join(os.path.dirname(_wd.__file__), "config.yaml"))
+        except Exception:
+            pass
+        # Repo-local: <this_script>/../wildfire_detector/config.yaml
+        _candidates.append(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "wildfire_detector", "config.yaml"))
+
+        for _cand in _candidates:
+            if _cand and os.path.exists(_cand):
+                _config_path = _cand
+                break
+        if _config_path is None:
+            raise FileNotFoundError(
+                "Could not locate wildfire_detector/config.yaml. Looked in:\n  "
+                + "\n  ".join(str(c) for c in _candidates)
+            )
+
+        print(f"[config] Using source config: {_config_path}")
         with open(_config_path, "r") as _f:
             _cfg = _yaml.safe_load(_f)
         _cfg["phase2"]["trt_precision"] = "int8" if args.backend == "int8" else "fp16"
@@ -214,7 +310,15 @@ def main():
             _yaml.dump(_cfg, _f, default_flow_style=False)
 
     print(f"Initializing ScanManager ({args.backend})...")
-    sm = ScanManager(config_path=_temp_config_path, verbose=False)
+    # Be robust to older installed wildfire_detector wheels that may not accept
+    # the `verbose` and/or `config_path` kwargs.
+    try:
+        sm = ScanManager(config_path=_temp_config_path, verbose=False)
+    except TypeError:
+        try:
+            sm = ScanManager(config_path=_temp_config_path)
+        except TypeError:
+            sm = ScanManager()
 
     # Read model name from config (whatever is currently set in wildfire_detector/config.yaml)
     model_name = sm.config["phase2"]["model_name"]
@@ -222,6 +326,9 @@ def main():
     # --- Config ---
     rgb_size = sm.config["image"]["rgb_size"]
     canvas_h, canvas_w = rgb_size[0], rgb_size[1]
+
+    is_raw = args.crop_mode == "raw"
+    image_size = sm.config["phase2"]["net_image_size"]
 
     # Override crop factors if specified via CLI
     if args.crop_factors:
@@ -234,13 +341,16 @@ def main():
     print(f"\nModel: {model_name}")
     print(f"Backend: {args.backend} ({precision})")
     print(f"Canvas: {canvas_h}x{canvas_w}")
-    print(f"Crop factors: {crop_factors}")
+    if is_raw:
+        print(f"Crop mode: raw (whole frame resized to {image_size}x{image_size}, no cropping)")
+    else:
+        print(f"Crop mode: crops | Crop factors: {crop_factors}")
 
     # Note: ScanManager.__init__ already performs warmup internally
     # (configured by config.yaml warmup.num_iterations)
 
     # --- Load dataset ---
-    samples = load_dataset(args.dataset)
+    samples = load_dataset(args.dataset, args.fire_labels_subdir)
     fire_count = sum(1 for s in samples if s["label"] == 1)
     nofire_count = sum(1 for s in samples if s["label"] == 0)
     print(f"Dataset: {len(samples)} images (Fire: {fire_count}, NoFire: {nofire_count})")
@@ -248,6 +358,7 @@ def main():
     # --- Run inference ---
     print("\nRunning inference...")
     results = []
+    skipped_no_bbox = 0
 
     for idx, sample in enumerate(tqdm(samples, desc="Inference", unit="img")):
         # Load image
@@ -257,32 +368,50 @@ def main():
         image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         H_orig, W_orig = image_rgb.shape[:2]
 
+        # Determine bbox presence (label file exists AND is non-empty)
+        parsed = None
+        if sample["label"] == 1 and sample["label_path"] is not None:
+            parsed = parse_yolo_label(sample["label_path"])
+        has_bbox = parsed is not None
+
+        # Fire images WITHOUT a bbox are skipped in EVERY mode (raw/single/multi)
+        # so all strategies are evaluated on the exact same image set (equal
+        # denominators for a fair comparison). NoFire images are always kept.
+        if sample["label"] == 1 and not has_bbox:
+            skipped_no_bbox += 1
+            continue
+
         # Prepare frame on canvas (same as TestingPackageCode_02)
         frame, scale, y_off, x_off = prepare_frame(image_rgb, canvas_h, canvas_w)
 
-        # Determine bbox
-        if sample["label"] == 1 and sample["label_path"] is not None:
-            parsed = parse_yolo_label(sample["label_path"])
-            if parsed is not None:
+        if is_raw:
+            # Raw whole-frame classification: no bbox crop, use the full frame.
+            final_class, avg_conf, timings = classify_raw_frame(
+                sm, frame, args.backend, image_size)
+            pred_label = 1 if final_class in ("Fire", 1) else 0
+            confidence = avg_conf
+        else:
+            # Determine bbox for crop modes
+            if sample["label"] == 1:
                 xc, yc, w, h = parsed
                 bbox = yolo_to_canvas_bbox(xc, yc, w, h, H_orig, W_orig, scale, y_off, x_off)
             else:
                 bbox = compute_virtual_bbox(canvas_h, canvas_w, max_crop_factor)
-        else:
-            bbox = compute_virtual_bbox(canvas_h, canvas_w, max_crop_factor)
 
-        # Call phase2 through ScanManager (same as TestingPackageCode_02)
-        md = build_metadata(sm, bbox)
-        result = sm.phase2(frame, md)
+            # Call phase2 through ScanManager (same as TestingPackageCode_02)
+            md = build_metadata(sm, bbox)
+            result = sm.phase2(frame, md)
+            pred_label = 1 if result["final_prediction"] in ("Fire", 1) else 0
+            confidence = result["confidence"]
 
-        # Collect timings from instrumented _phase2_inner
-        timings = sm.last_phase2_timings if hasattr(sm, 'last_phase2_timings') else {}
+            # Collect timings from instrumented _phase2_inner
+            timings = sm.last_phase2_timings if hasattr(sm, 'last_phase2_timings') else {}
 
         results.append({
             "image": sample["image_name"],
             "true_label": sample["label"],
-            "pred_label": 1 if result["final_prediction"] in ("Fire", 1) else 0,
-            "confidence": round(result["confidence"], 4),
+            "pred_label": pred_label,
+            "confidence": round(confidence, 4),
             "input_and_metadata_ms": round(timings.get('input_and_metadata', 0) * 1000, 3),
             "region_validation_ms": round(timings.get('region_validation', 0) * 1000, 3),
             "crop_extraction_ms": round(timings.get('crop_extraction', 0) * 1000, 3),
@@ -293,7 +422,9 @@ def main():
             "total_ms": round(timings.get('total', 0) * 1000, 3),
         })
 
-
+    if skipped_no_bbox > 0:
+        print(f"\nSkipped {skipped_no_bbox} fire image(s) without a bbox label "
+              f"(excluded from all crop modes for a fair comparison).")
 
     # --- Compute metrics ---
     df = pd.DataFrame(results)
@@ -340,7 +471,12 @@ def main():
     print("=" * 60)
 
     # --- Save ---
-    crops_suffix = f"_crops{len(crop_factors)}" if args.crop_factors else ""
+    if is_raw:
+        crops_suffix = "_raw"
+    elif args.crop_factors:
+        crops_suffix = f"_crops{len(crop_factors)}"
+    else:
+        crops_suffix = ""
     save_dir = os.path.join(args.output_dir, f"{model_name}_{args.backend}{crops_suffix}")
     os.makedirs(save_dir, exist_ok=True)
 
@@ -350,8 +486,9 @@ def main():
         "model": model_name,
         "backend": args.backend,
         "precision": precision,
-        "num_crops": len(crop_factors),
-        "crop_factors": str(crop_factors),
+        "crop_mode": args.crop_mode,
+        "num_crops": 1 if is_raw else len(crop_factors),
+        "crop_factors": "raw" if is_raw else str(crop_factors),
         "dataset": args.dataset,
         "num_images": len(df),
         "accuracy": round(accuracy * 100, 2),
